@@ -407,3 +407,71 @@ TEST_CASE("compiler rejects physical channel usage above the largest configured 
     REQUIRE(result.diagnostics.front().message.find("8589934590") != std::string::npos);
     REQUIRE(result.diagnostics.front().message.find("4294967295") != std::string::npos);
 }
+
+TEST_CASE("latency-break back-edge output does not inherit an expired audio slot") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.audio-source", NodeScope::global,
+        {port("out", PortDirection::output, PortKind::audio)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.audio-sink", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::audio)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.audio-delay", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::audio)}, true)));
+    const GraphSnapshot graph{
+        {
+            node("d-producer", "test.audio-source"),
+            node("c-delay", "test.audio-delay"),
+            node("b-temp-consumer", "test.audio-sink"),
+            node("a-temp-producer", "test.audio-source"),
+        },
+        {
+            connection("d-producer", "out", "c-delay", "in"),
+            connection("a-temp-producer", "out", "b-temp-consumer", "in"),
+        },
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE(result.graph.has_value());
+    REQUIRE(result.graph->globalOrder ==
+            std::vector<NodeId>{NodeId{"a-temp-producer"}, NodeId{"b-temp-consumer"},
+                                NodeId{"c-delay"}, NodeId{"d-producer"}});
+    REQUIRE(audioAssignmentFor(*result.graph, {NodeId{"a-temp-producer"}, PortId{"out"}}).slot !=
+            audioAssignmentFor(*result.graph, {NodeId{"d-producer"}, PortId{"out"}}).slot);
+}
+
+TEST_CASE("self latency-break output does not inherit an expired control slot") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.control-source", NodeScope::global,
+        {port("out", PortDirection::output, PortKind::control)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.control-sink", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::control)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.control-delay", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::control),
+         port("out", PortDirection::output, PortKind::control)},
+        true)));
+    const GraphSnapshot graph{
+        {
+            node("c-delay", "test.control-delay"),
+            node("b-temp-consumer", "test.control-sink"),
+            node("a-temp-producer", "test.control-source"),
+        },
+        {
+            connection("c-delay", "out", "c-delay", "in"),
+            connection("a-temp-producer", "out", "b-temp-consumer", "in"),
+        },
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE(result.graph.has_value());
+    REQUIRE(result.graph->globalOrder ==
+            std::vector<NodeId>{NodeId{"a-temp-producer"}, NodeId{"b-temp-consumer"}, NodeId{"c-delay"}});
+    REQUIRE(controlAssignmentFor(*result.graph, {NodeId{"a-temp-producer"}, PortId{"out"}}).slot !=
+            controlAssignmentFor(*result.graph, {NodeId{"c-delay"}, PortId{"out"}}).slot);
+}

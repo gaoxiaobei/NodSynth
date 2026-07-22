@@ -17,12 +17,14 @@ struct LiveOutput {
     std::uint32_t channels;
     std::size_t productionIndex;
     std::size_t finalConsumerIndex;
+    bool dedicated;
 };
 
 struct ActiveSlot {
     std::uint32_t slot;
     std::uint32_t channels;
     std::size_t finalConsumerIndex;
+    bool reusable;
 };
 
 struct NamespacePlan {
@@ -68,7 +70,9 @@ NamespacePlan planNamespace(
             auto activeSlot = active.begin();
             while (activeSlot != active.end()) {
                 if (activeSlot->finalConsumerIndex < currentProduction) {
-                    freeSlotsByChannels[activeSlot->channels].insert(activeSlot->slot);
+                    if (activeSlot->reusable) {
+                        freeSlotsByChannels[activeSlot->channels].insert(activeSlot->slot);
+                    }
                     activeSlot = active.erase(activeSlot);
                 } else {
                     ++activeSlot;
@@ -79,7 +83,7 @@ NamespacePlan planNamespace(
         const auto channels = singleChannel ? std::uint32_t{1} : output.channels;
         auto& freeSlots = freeSlotsByChannels[channels];
         std::uint32_t slot{};
-        if (!freeSlots.empty()) {
+        if (!output.dedicated && !freeSlots.empty()) {
             slot = *freeSlots.begin();
             freeSlots.erase(freeSlots.begin());
         } else {
@@ -91,7 +95,7 @@ NamespacePlan planNamespace(
         }
 
         result.assignments.push_back({output.endpoint, slot, channels, scope});
-        active.push_back({slot, channels, output.finalConsumerIndex});
+        active.push_back({slot, channels, output.finalConsumerIndex, !output.dedicated});
     }
     return result;
 }
@@ -109,6 +113,7 @@ std::pair<std::vector<LiveOutput>, std::vector<LiveOutput>> collectLiveOutputs(
     }
 
     std::map<model::Endpoint, std::size_t> finalConsumers;
+    std::set<model::Endpoint> dedicatedOutputs;
     for (const auto& connection : graph.connections) {
         if (!scheduleIndex.contains(connection.from.nodeId)) continue;
 
@@ -118,6 +123,9 @@ std::pair<std::vector<LiveOutput>, std::vector<LiveOutput>> collectLiveOutputs(
         const auto consumerIndex = targetSchema != nullptr && targetSchema->breaksDependencyCycle
                                        ? order.size()
                                        : consumer == scheduleIndex.end() ? order.size() : consumer->second;
+        if (targetSchema != nullptr && targetSchema->breaksDependencyCycle) {
+            dedicatedOutputs.insert(connection.from);
+        }
         const auto [found, inserted] = finalConsumers.emplace(connection.from, consumerIndex);
         if (!inserted) found->second = std::max(found->second, consumerIndex);
     }
@@ -140,7 +148,13 @@ std::pair<std::vector<LiveOutput>, std::vector<LiveOutput>> collectLiveOutputs(
                                                 ? productionIndex
                                                 : std::max(productionIndex, finalConsumer->second);
             auto& outputs = port.kind == model::PortKind::audio ? audio : control;
-            outputs.push_back({endpoint, port.channels, productionIndex, finalConsumerIndex});
+            outputs.push_back({
+                endpoint,
+                port.channels,
+                productionIndex,
+                finalConsumerIndex,
+                dedicatedOutputs.contains(endpoint),
+            });
         }
     }
     return {std::move(audio), std::move(control)};
