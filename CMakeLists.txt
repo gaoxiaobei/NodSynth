@@ -18,6 +18,7 @@ target_include_directories(nod_model PUBLIC include)
 target_compile_features(nod_model PUBLIC cxx_std_20)
 
 add_library(nod_compiler
+  src/compiler/BufferPlanner.cpp
   src/compiler/DependencyGraph.cpp
   src/compiler/GraphCompiler.cpp
 )

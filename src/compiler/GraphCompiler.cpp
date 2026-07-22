@@ -1,5 +1,6 @@
 #include <nodsynth/compiler/GraphCompiler.h>
 
+#include "BufferPlanner.h"
 #include "DependencyGraph.h"
 
 #include <algorithm>
@@ -93,6 +94,17 @@ void sortDiagnostics(std::vector<Diagnostic>& diagnostics) {
 
 CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const model::SchemaRegistry& registry) const {
     CompileResult result;
+    if (graph.nodes.size() > limits_.maxNodes) {
+        addError(
+            result,
+            DiagnosticCode::resourceLimitExceeded,
+            std::nullopt,
+            std::nullopt,
+            "Graph node count " + std::to_string(graph.nodes.size()) + " exceeds the allowed maximum " +
+                std::to_string(limits_.maxNodes) + ".");
+        return result;
+    }
+
     NodeRecords nodes;
     NodeSchemas schemas;
     detail::DependencyGraph perVoiceDependencies;
@@ -217,14 +229,54 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
                  "The graph contains a current-block dependency cycle.");
     }
 
-    sortDiagnostics(result.diagnostics);
-    const bool hasError = std::ranges::any_of(result.diagnostics, [](const Diagnostic& diagnostic) {
+    const bool validationFailed = std::ranges::any_of(result.diagnostics, [](const Diagnostic& diagnostic) {
         return diagnostic.severity == Severity::error;
     });
-    if (!hasError) {
-        result.graph.emplace();
-        result.graph->perVoiceOrder = std::move(perVoiceOrder);
-        result.graph->globalOrder = std::move(globalOrder);
+    if (validationFailed) {
+        sortDiagnostics(result.diagnostics);
+        return result;
+    }
+
+    auto buffers = detail::planBuffers(graph, registry, perVoiceOrder, globalOrder);
+    const auto physicalChannels =
+        static_cast<std::uint64_t>(buffers.perVoicePhysicalChannels) * limits_.maxVoices +
+        buffers.globalPhysicalChannels;
+    if (physicalChannels > limits_.maxPhysicalBufferChannels) {
+        addError(
+            result,
+            DiagnosticCode::resourceLimitExceeded,
+            std::nullopt,
+            std::nullopt,
+            "Physical buffer channel count " + std::to_string(physicalChannels) +
+                " exceeds the allowed maximum " + std::to_string(limits_.maxPhysicalBufferChannels) + ".");
+        sortDiagnostics(result.diagnostics);
+        return result;
+    }
+
+    result.graph.emplace();
+    result.graph->perVoiceOrder = std::move(perVoiceOrder);
+    result.graph->globalOrder = std::move(globalOrder);
+    result.graph->audioBuffers = std::move(buffers.audio);
+    result.graph->controlBuffers = std::move(buffers.control);
+
+    for (const auto& [nodeId, records] : nodes) {
+        const auto schema = schemas.find(nodeId);
+        result.graph->nodes.push_back({*records.front(), schema->second->scope});
+    }
+
+    for (const auto* connection : connections) {
+        const auto source = resolveEndpoint(connection->from, nodes, schemas, result);
+        const auto kind = source->portSchema.kind;
+        std::uint32_t slot = 0;
+        const auto& assignments = kind == model::PortKind::audio
+                                      ? result.graph->audioBuffers
+                                      : result.graph->controlBuffers;
+        if (kind == model::PortKind::audio || kind == model::PortKind::control) {
+            const auto assignment =
+                std::ranges::find(assignments, connection->from, &BufferAssignment::output);
+            if (assignment != assignments.end()) slot = assignment->slot;
+        }
+        result.graph->connections.push_back({*connection, kind, slot});
     }
     return result;
 }
