@@ -1,6 +1,7 @@
 #include <nodsynth/compiler/GraphCompiler.h>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <optional>
 #include <set>
@@ -67,7 +68,9 @@ void sortDiagnostics(std::vector<Diagnostic>& diagnostics) {
     std::ranges::sort(diagnostics, [](const Diagnostic& left, const Diagnostic& right) {
         if (left.code != right.code) return left.code < right.code;
         if (left.nodeId != right.nodeId) return left.nodeId < right.nodeId;
-        return left.portId < right.portId;
+        if (left.portId != right.portId) return left.portId < right.portId;
+        if (left.severity != right.severity) return left.severity < right.severity;
+        return left.message < right.message;
     });
 }
 } // namespace
@@ -76,6 +79,7 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
     CompileResult result;
     NodeRecords nodes;
     NodeSchemas schemas;
+    std::set<model::NodeId> unsupportedVersions;
 
     for (const auto& node : graph.nodes) {
         nodes[node.id].push_back(&node);
@@ -98,6 +102,8 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
             if (node->schemaVersion != schema->schemaVersion) {
                 addError(result, DiagnosticCode::unsupportedSchemaVersion, node->id, std::nullopt,
                          "The node's schema version is not supported by the registered schema.");
+                unsupportedVersions.insert(node->id);
+                continue;
             }
 
             for (const auto& [parameterId, value] : node->parameters) {
@@ -105,7 +111,8 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
                 if (parameter == nullptr) {
                     addError(result, DiagnosticCode::unknownParameter, node->id, std::nullopt,
                              "The node stores an unknown parameter '" + parameterId.value + "'.");
-                } else if (!(parameter->minimum <= value && value <= parameter->maximum)) {
+                } else if (!std::isfinite(value) ||
+                           !(parameter->minimum <= value && value <= parameter->maximum)) {
                     addError(result, DiagnosticCode::parameterOutOfRange, node->id, std::nullopt,
                              "A stored parameter value is outside its inclusive schema range.");
                 }
@@ -113,7 +120,10 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
         }
 
         if (records.size() == 1) {
-            schemas.emplace(nodeId, registry.find(records.front()->typeId));
+            const auto* schema = registry.find(records.front()->typeId);
+            if (schema != nullptr && records.front()->schemaVersion == schema->schemaVersion) {
+                schemas.emplace(nodeId, schema);
+            }
         }
     }
 
@@ -124,6 +134,11 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
 
     std::set<model::Endpoint> connectedInputs;
     for (const auto* connection : connections) {
+        if (unsupportedVersions.contains(connection->from.nodeId) ||
+            unsupportedVersions.contains(connection->to.nodeId)) {
+            continue;
+        }
+
         const auto source = resolveEndpoint(connection->from, nodes, schemas, result);
         const auto target = resolveEndpoint(connection->to, nodes, schemas, result);
 

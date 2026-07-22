@@ -2,6 +2,8 @@
 #include <nodsynth/compiler/GraphCompiler.h>
 
 #include <algorithm>
+#include <limits>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -23,6 +25,8 @@ bool hasDiagnostic(
 }
 
 using DiagnosticLocation = std::tuple<DiagnosticCode, std::optional<NodeId>, std::optional<PortId>>;
+using DiagnosticSnapshot =
+    std::tuple<DiagnosticCode, std::optional<NodeId>, std::optional<PortId>, Severity, std::string>;
 
 std::vector<DiagnosticLocation> diagnosticLocations(const CompileResult& result) {
     std::vector<DiagnosticLocation> locations;
@@ -30,6 +34,15 @@ std::vector<DiagnosticLocation> diagnosticLocations(const CompileResult& result)
         locations.emplace_back(diagnostic.code, diagnostic.nodeId, diagnostic.portId);
     }
     return locations;
+}
+
+std::vector<DiagnosticSnapshot> diagnosticSnapshots(const CompileResult& result) {
+    std::vector<DiagnosticSnapshot> snapshots;
+    for (const auto& diagnostic : result.diagnostics) {
+        snapshots.emplace_back(
+            diagnostic.code, diagnostic.nodeId, diagnostic.portId, diagnostic.severity, diagnostic.message);
+    }
+    return snapshots;
 }
 } // namespace
 
@@ -158,6 +171,29 @@ TEST_CASE("compiler locates an unsupported schema version") {
     REQUIRE(hasDiagnostic(result, DiagnosticCode::unsupportedSchemaVersion, NodeId{"parameter"}));
 }
 
+TEST_CASE("compiler suppresses schema-dependent diagnostics for an unsupported version") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(audioSourceSchema()));
+    REQUIRE(registry.registerSchema(controlSinkSchema()));
+    const GraphSnapshot graph{
+        {
+            {NodeId{"source"}, NodeTypeId{"test.audio-source"}, 2,
+             {{ParameterId{"unknown"}, 0.5}}, "{}", {}},
+            {NodeId{"sink"}, NodeTypeId{"test.control-sink"}, 1, {}, "{}", {}},
+        },
+        {
+            {{NodeId{"source"}, PortId{"audio"}}, {NodeId{"sink"}, PortId{"frequency"}}},
+            {{NodeId{"source"}, PortId{"audio"}}, {NodeId{"sink"}, PortId{"frequency"}}},
+        },
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE_FALSE(result.graph.has_value());
+    REQUIRE(result.diagnostics.size() == 1);
+    REQUIRE(hasDiagnostic(result, DiagnosticCode::unsupportedSchemaVersion, NodeId{"source"}));
+}
+
 TEST_CASE("compiler locates an unknown stored parameter") {
     SchemaRegistry registry;
     REQUIRE(registry.registerSchema(parameterNodeSchema()));
@@ -183,6 +219,33 @@ TEST_CASE("compiler locates a stored parameter outside its inclusive range") {
 
     REQUIRE_FALSE(result.graph.has_value());
     REQUIRE(hasDiagnostic(result, DiagnosticCode::parameterOutOfRange, NodeId{"parameter"}));
+}
+
+TEST_CASE("compiler rejects non-finite parameters even with infinite schema bounds") {
+    auto schema = parameterNodeSchema();
+    schema.parameters.front().minimum = -std::numeric_limits<double>::infinity();
+    schema.parameters.front().maximum = std::numeric_limits<double>::infinity();
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(std::move(schema)));
+    const GraphSnapshot graph{
+        {
+            {NodeId{"nan"}, NodeTypeId{"test.parameter-node"}, 1,
+             {{ParameterId{"gain"}, std::numeric_limits<double>::quiet_NaN()}}, "{}", {}},
+            {NodeId{"positive-infinity"}, NodeTypeId{"test.parameter-node"}, 1,
+             {{ParameterId{"gain"}, std::numeric_limits<double>::infinity()}}, "{}", {}},
+            {NodeId{"negative-infinity"}, NodeTypeId{"test.parameter-node"}, 1,
+             {{ParameterId{"gain"}, -std::numeric_limits<double>::infinity()}}, "{}", {}},
+        },
+        {},
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE_FALSE(result.graph.has_value());
+    REQUIRE(result.diagnostics.size() == 3);
+    REQUIRE(hasDiagnostic(result, DiagnosticCode::parameterOutOfRange, NodeId{"nan"}));
+    REQUIRE(hasDiagnostic(result, DiagnosticCode::parameterOutOfRange, NodeId{"positive-infinity"}));
+    REQUIRE(hasDiagnostic(result, DiagnosticCode::parameterOutOfRange, NodeId{"negative-infinity"}));
 }
 
 TEST_CASE("compiler locates a duplicate node ID") {
@@ -230,7 +293,26 @@ TEST_CASE("compiler returns all independent diagnostics in stable code node port
     REQUIRE(std::ranges::is_sorted(diagnosticLocations(first)));
     REQUIRE(hasDiagnostic(first, DiagnosticCode::missingNodeType, NodeId{"z-missing-type"}));
     REQUIRE(hasDiagnostic(first, DiagnosticCode::unsupportedSchemaVersion, NodeId{"a-parameter"}));
-    REQUIRE(hasDiagnostic(first, DiagnosticCode::missingEndpointNode, NodeId{"absent"}, PortId{"input"}));
     REQUIRE(hasDiagnostic(first, DiagnosticCode::unknownParameter, NodeId{"b-parameter"}));
-    REQUIRE(hasDiagnostic(first, DiagnosticCode::parameterOutOfRange, NodeId{"a-parameter"}));
+    REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::missingEndpointNode, NodeId{"absent"}, PortId{"input"}));
+    REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::parameterOutOfRange, NodeId{"a-parameter"}));
+}
+
+TEST_CASE("compiler deterministically orders diagnostics tied by code node and port") {
+    const GraphSnapshot graph{
+        {
+            {NodeId{"duplicate"}, NodeTypeId{"test.z-absent"}, 1, {}, "{}", {}},
+            {NodeId{"duplicate"}, NodeTypeId{"test.a-absent"}, 1, {}, "{}", {}},
+        },
+        {},
+    };
+    auto permuted = graph;
+    std::ranges::reverse(permuted.nodes);
+    const SchemaRegistry registry;
+
+    const auto first = GraphCompiler{}.compile(graph, registry);
+    const auto second = GraphCompiler{}.compile(permuted, registry);
+
+    REQUIRE(diagnosticSnapshots(first) == diagnosticSnapshots(second));
+    REQUIRE(std::ranges::is_sorted(diagnosticSnapshots(first)));
 }
