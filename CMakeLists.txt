@@ -17,7 +17,10 @@ add_library(nod_model
 target_include_directories(nod_model PUBLIC include)
 target_compile_features(nod_model PUBLIC cxx_std_20)
 
-add_library(nod_compiler src/compiler/GraphCompiler.cpp)
+add_library(nod_compiler
+  src/compiler/DependencyGraph.cpp
+  src/compiler/GraphCompiler.cpp
+)
 target_include_directories(nod_compiler PUBLIC include)
 target_link_libraries(nod_compiler PUBLIC nod_model)
 target_compile_features(nod_compiler PUBLIC cxx_std_20)

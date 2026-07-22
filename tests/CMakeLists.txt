@@ -1,4 +1,5 @@
 add_executable(nod_tests
+  compiler/GraphSchedulingTests.cpp
   compiler/GraphValidationTests.cpp
   model/BuildInfoTests.cpp
   model/GraphEditorTests.cpp

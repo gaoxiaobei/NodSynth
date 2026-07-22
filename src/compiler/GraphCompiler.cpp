@@ -1,7 +1,11 @@
 #include <nodsynth/compiler/GraphCompiler.h>
 
+#include "DependencyGraph.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <exception>
 #include <map>
 #include <optional>
 #include <set>
@@ -17,6 +21,18 @@ struct ResolvedEndpoint {
     const model::NodeSchema& nodeSchema;
     const model::PortSchema& portSchema;
 };
+
+model::NodeScope resolveDomain(const model::NodeSchema& owner, const model::PortSchema& port) {
+    switch (port.domain) {
+        case model::PortDomain::perVoice:
+            return model::NodeScope::perVoice;
+        case model::PortDomain::global:
+            return model::NodeScope::global;
+        case model::PortDomain::sameAsNode:
+            return owner.scope;
+    }
+    std::terminate();
+}
 
 void addError(
     CompileResult& result,
@@ -79,6 +95,10 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
     CompileResult result;
     NodeRecords nodes;
     NodeSchemas schemas;
+    detail::DependencyGraph perVoiceDependencies;
+    detail::DependencyGraph globalDependencies;
+    std::size_t perVoiceNodeCount = 0;
+    std::size_t globalNodeCount = 0;
 
     for (const auto& node : graph.nodes) {
         nodes[node.id].push_back(&node);
@@ -125,6 +145,16 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
         }
     }
 
+    for (const auto& [nodeId, schema] : schemas) {
+        if (schema->scope == model::NodeScope::perVoice) {
+            perVoiceDependencies.addNode(nodeId);
+            ++perVoiceNodeCount;
+        } else {
+            globalDependencies.addNode(nodeId);
+            ++globalNodeCount;
+        }
+    }
+
     std::vector<const model::Connection*> connections;
     connections.reserve(graph.connections.size());
     for (const auto& connection : graph.connections) connections.push_back(&connection);
@@ -161,13 +191,41 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
             addError(result, DiagnosticCode::channelCountMismatch, connection->to.nodeId, connection->to.portId,
                      "Connected audio ports have different channel counts.");
         }
+
+        const bool domainsMatch = resolveDomain(source->nodeSchema, source->portSchema) ==
+                                  resolveDomain(target->nodeSchema, target->portSchema);
+        if (!domainsMatch) {
+            addError(result, DiagnosticCode::domainMismatch, connection->to.nodeId, connection->to.portId,
+                     "Connected ports belong to different processing domains.");
+        }
+
+        const bool directionsMatch = source->portSchema.direction == model::PortDirection::output &&
+                                     target->portSchema.direction == model::PortDirection::input;
+        const bool sameSchedule = source->nodeSchema.scope == target->nodeSchema.scope;
+        if (directionsMatch && domainsMatch && sameSchedule && !target->nodeSchema.breaksDependencyCycle) {
+            auto& dependencies = source->nodeSchema.scope == model::NodeScope::perVoice
+                                     ? perVoiceDependencies
+                                     : globalDependencies;
+            dependencies.addDependency(connection->from.nodeId, connection->to.nodeId);
+        }
+    }
+
+    auto perVoiceOrder = perVoiceDependencies.topologicalOrder();
+    auto globalOrder = globalDependencies.topologicalOrder();
+    if (perVoiceOrder.size() != perVoiceNodeCount || globalOrder.size() != globalNodeCount) {
+        addError(result, DiagnosticCode::cycleDetected, std::nullopt, std::nullopt,
+                 "The graph contains a current-block dependency cycle.");
     }
 
     sortDiagnostics(result.diagnostics);
     const bool hasError = std::ranges::any_of(result.diagnostics, [](const Diagnostic& diagnostic) {
         return diagnostic.severity == Severity::error;
     });
-    if (!hasError) result.graph.emplace();
+    if (!hasError) {
+        result.graph.emplace();
+        result.graph->perVoiceOrder = std::move(perVoiceOrder);
+        result.graph->globalOrder = std::move(globalOrder);
+    }
     return result;
 }
 } // namespace nodsynth::compiler
