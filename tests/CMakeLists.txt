@@ -15,4 +15,11 @@ if(NODSYNTH_BUILD_GRAPHCHECK)
   add_test(NAME graphcheck.valid COMMAND nod_graphcheck --scenario valid)
   add_test(NAME graphcheck.type-error COMMAND nod_graphcheck --scenario type-error)
   add_test(NAME graphcheck.cycle COMMAND nod_graphcheck --scenario cycle)
+  add_test(
+    NAME graphcheck.unknown-scenario
+    COMMAND
+      ${CMAKE_COMMAND}
+      "-DGRAPHCHECK_EXECUTABLE=$<TARGET_FILE:nod_graphcheck>"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GraphCheckUnknownScenario.cmake"
+  )
 endif()

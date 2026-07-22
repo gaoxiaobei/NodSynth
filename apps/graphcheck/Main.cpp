@@ -4,7 +4,9 @@
 #include <string_view>
 
 int main(int argc, char** argv) {
-    if (argc != 3 || std::string_view{argv[1]} != "--scenario") {
+    if (argc != 3 || std::string_view{argv[1]} != "--scenario" ||
+        (std::string_view{argv[2]} != "valid" && std::string_view{argv[2]} != "type-error" &&
+         std::string_view{argv[2]} != "cycle")) {
         std::cerr << "usage: nod_graphcheck --scenario valid|type-error|cycle\n";
         return 64;
     }
