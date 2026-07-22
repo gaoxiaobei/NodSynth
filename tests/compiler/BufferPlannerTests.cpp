@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -321,4 +322,88 @@ TEST_CASE("compiler rejects the node limit before endpoint validation") {
     REQUIRE(result.diagnostics.front().message.find("0") != std::string::npos);
     REQUIRE_FALSE(result.diagnostics.front().nodeId.has_value());
     REQUIRE_FALSE(result.diagnostics.front().portId.has_value());
+}
+
+TEST_CASE("latency-break back-edge input keeps its producer buffer through the schedule") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.latency-input", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::audio)}, true)));
+    REQUIRE(registry.registerSchema(schema(
+        "test.audio-output", NodeScope::global,
+        {port("out", PortDirection::output, PortKind::audio)})));
+    const GraphSnapshot graph{
+        {
+            node("z-later", "test.audio-output"),
+            node("producer", "test.audio-output"),
+            node("delay", "test.latency-input"),
+        },
+        {connection("producer", "out", "delay", "in")},
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE(result.graph.has_value());
+    REQUIRE(result.graph->globalOrder ==
+            std::vector<NodeId>{NodeId{"delay"}, NodeId{"producer"}, NodeId{"z-later"}});
+    REQUIRE(audioAssignmentFor(*result.graph, {NodeId{"producer"}, PortId{"out"}}).slot !=
+            audioAssignmentFor(*result.graph, {NodeId{"z-later"}, PortId{"out"}}).slot);
+}
+
+TEST_CASE("self latency-break input keeps its control buffer through the schedule") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.control-delay", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::control),
+         port("out", PortDirection::output, PortKind::control)},
+        true)));
+    REQUIRE(registry.registerSchema(schema(
+        "test.control-output", NodeScope::global,
+        {port("out", PortDirection::output, PortKind::control)})));
+    const GraphSnapshot graph{
+        {node("z-later", "test.control-output"), node("delay", "test.control-delay")},
+        {connection("delay", "out", "delay", "in")},
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE(result.graph.has_value());
+    REQUIRE(result.graph->globalOrder == std::vector<NodeId>{NodeId{"delay"}, NodeId{"z-later"}});
+    REQUIRE(controlAssignmentFor(*result.graph, {NodeId{"delay"}, PortId{"out"}}).slot !=
+            controlAssignmentFor(*result.graph, {NodeId{"z-later"}, PortId{"out"}}).slot);
+}
+
+TEST_CASE("compiler rejects physical channel usage above the largest configured limit") {
+    constexpr auto maximumChannels = std::numeric_limits<std::uint32_t>::max();
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.maximum-source", NodeScope::global,
+        {port("out", PortDirection::output, PortKind::audio, maximumChannels)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.maximum-sink", NodeScope::global,
+        {port("a", PortDirection::input, PortKind::audio, maximumChannels),
+         port("b", PortDirection::input, PortKind::audio, maximumChannels)})));
+    const GraphSnapshot graph{
+        {
+            node("source-b", "test.maximum-source"),
+            node("sink", "test.maximum-sink"),
+            node("source-a", "test.maximum-source"),
+        },
+        {
+            connection("source-a", "out", "sink", "a"),
+            connection("source-b", "out", "sink", "b"),
+        },
+    };
+
+    const auto result = GraphCompiler{{
+        .maxNodes = 4096,
+        .maxPhysicalBufferChannels = maximumChannels,
+        .maxVoices = 16,
+    }}.compile(graph, registry);
+
+    REQUIRE_FALSE(result.graph.has_value());
+    REQUIRE(result.diagnostics.size() == 1);
+    REQUIRE(result.diagnostics.front().code == DiagnosticCode::resourceLimitExceeded);
+    REQUIRE(result.diagnostics.front().message.find("8589934590") != std::string::npos);
+    REQUIRE(result.diagnostics.front().message.find("4294967295") != std::string::npos);
 }

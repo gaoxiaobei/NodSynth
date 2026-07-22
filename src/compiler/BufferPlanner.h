@@ -10,8 +10,9 @@ namespace nodsynth::compiler::detail {
 struct PlannedBuffers {
     std::vector<BufferAssignment> audio;
     std::vector<BufferAssignment> control;
-    std::uint32_t perVoicePhysicalChannels{};
-    std::uint32_t globalPhysicalChannels{};
+    std::uint64_t perVoicePhysicalChannels{};
+    std::uint64_t globalPhysicalChannels{};
+    bool physicalChannelCountOverflow{};
 };
 
 PlannedBuffers planBuffers(

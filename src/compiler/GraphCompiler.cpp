@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -238,16 +239,31 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
     }
 
     auto buffers = detail::planBuffers(graph, registry, perVoiceOrder, globalOrder);
-    const auto physicalChannels =
-        static_cast<std::uint64_t>(buffers.perVoicePhysicalChannels) * limits_.maxVoices +
-        buffers.globalPhysicalChannels;
-    if (physicalChannels > limits_.maxPhysicalBufferChannels) {
+    auto physicalChannels = std::uint64_t{};
+    auto physicalChannelCountOverflow = buffers.physicalChannelCountOverflow;
+    if (!physicalChannelCountOverflow && limits_.maxVoices != 0 &&
+        buffers.perVoicePhysicalChannels >
+            std::numeric_limits<std::uint64_t>::max() / limits_.maxVoices) {
+        physicalChannelCountOverflow = true;
+    } else if (!physicalChannelCountOverflow) {
+        physicalChannels = buffers.perVoicePhysicalChannels * limits_.maxVoices;
+        if (buffers.globalPhysicalChannels >
+            std::numeric_limits<std::uint64_t>::max() - physicalChannels) {
+            physicalChannelCountOverflow = true;
+        } else {
+            physicalChannels += buffers.globalPhysicalChannels;
+        }
+    }
+    if (physicalChannelCountOverflow || physicalChannels > limits_.maxPhysicalBufferChannels) {
+        const auto actual = physicalChannelCountOverflow
+                                ? std::string{"overflow beyond 64-bit accounting"}
+                                : std::to_string(physicalChannels);
         addError(
             result,
             DiagnosticCode::resourceLimitExceeded,
             std::nullopt,
             std::nullopt,
-            "Physical buffer channel count " + std::to_string(physicalChannels) +
+            "Physical buffer channel count " + actual +
                 " exceeds the allowed maximum " + std::to_string(limits_.maxPhysicalBufferChannels) + ".");
         sortDiagnostics(result.diagnostics);
         return result;

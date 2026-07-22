@@ -27,14 +27,22 @@ struct ActiveSlot {
 
 struct NamespacePlan {
     std::vector<BufferAssignment> assignments;
-    std::uint32_t physicalChannels{};
+    std::uint64_t physicalChannels{};
+    bool physicalChannelCountOverflow{};
 };
 
-std::uint32_t saturatedAdd(std::uint32_t left, std::uint32_t right) {
-    if (right > std::numeric_limits<std::uint32_t>::max() - left) {
-        return std::numeric_limits<std::uint32_t>::max();
+struct ChannelUsage {
+    std::uint64_t channels{};
+    bool overflow{};
+};
+
+void checkedAdd(std::uint64_t& total, std::uint64_t amount, bool& overflow) {
+    if (amount > std::numeric_limits<std::uint64_t>::max() - total) {
+        total = std::numeric_limits<std::uint64_t>::max();
+        overflow = true;
+        return;
     }
-    return left + right;
+    total += amount;
 }
 
 NamespacePlan planNamespace(
@@ -76,7 +84,10 @@ NamespacePlan planNamespace(
             freeSlots.erase(freeSlots.begin());
         } else {
             slot = nextSlot++;
-            result.physicalChannels = saturatedAdd(result.physicalChannels, channels);
+            checkedAdd(
+                result.physicalChannels,
+                channels,
+                result.physicalChannelCountOverflow);
         }
 
         result.assignments.push_back({output.endpoint, slot, channels, scope});
@@ -101,8 +112,12 @@ std::pair<std::vector<LiveOutput>, std::vector<LiveOutput>> collectLiveOutputs(
     for (const auto& connection : graph.connections) {
         if (!scheduleIndex.contains(connection.from.nodeId)) continue;
 
+        const auto targetNode = nodes.find(connection.to.nodeId);
+        const auto* targetSchema = targetNode == nodes.end() ? nullptr : registry.find(targetNode->second->typeId);
         const auto consumer = scheduleIndex.find(connection.to.nodeId);
-        const auto consumerIndex = consumer == scheduleIndex.end() ? order.size() : consumer->second;
+        const auto consumerIndex = targetSchema != nullptr && targetSchema->breaksDependencyCycle
+                                       ? order.size()
+                                       : consumer == scheduleIndex.end() ? order.size() : consumer->second;
         const auto [found, inserted] = finalConsumers.emplace(connection.from, consumerIndex);
         if (!inserted) found->second = std::max(found->second, consumerIndex);
     }
@@ -131,7 +146,7 @@ std::pair<std::vector<LiveOutput>, std::vector<LiveOutput>> collectLiveOutputs(
     return {std::move(audio), std::move(control)};
 }
 
-std::uint32_t planSchedule(
+ChannelUsage planSchedule(
     PlannedBuffers& result,
     const model::GraphSnapshot& graph,
     const model::SchemaRegistry& registry,
@@ -149,7 +164,12 @@ std::uint32_t planSchedule(
         result.control.end(),
         std::make_move_iterator(control.assignments.begin()),
         std::make_move_iterator(control.assignments.end()));
-    return saturatedAdd(audio.physicalChannels, control.physicalChannels);
+    ChannelUsage usage{
+        .channels = audio.physicalChannels,
+        .overflow = audio.physicalChannelCountOverflow || control.physicalChannelCountOverflow,
+    };
+    checkedAdd(usage.channels, control.physicalChannels, usage.overflow);
+    return usage;
 }
 } // namespace
 
@@ -159,10 +179,13 @@ PlannedBuffers planBuffers(
     const std::vector<model::NodeId>& perVoiceOrder,
     const std::vector<model::NodeId>& globalOrder) {
     PlannedBuffers result;
-    result.perVoicePhysicalChannels =
+    const auto perVoice =
         planSchedule(result, graph, registry, perVoiceOrder, model::NodeScope::perVoice);
-    result.globalPhysicalChannels =
+    const auto global =
         planSchedule(result, graph, registry, globalOrder, model::NodeScope::global);
+    result.perVoicePhysicalChannels = perVoice.channels;
+    result.globalPhysicalChannels = global.channels;
+    result.physicalChannelCountOverflow = perVoice.overflow || global.overflow;
     std::ranges::sort(result.audio, {}, &BufferAssignment::output);
     std::ranges::sort(result.control, {}, &BufferAssignment::output);
     return result;
