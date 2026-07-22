@@ -151,6 +151,21 @@ TEST_CASE("per-voice output cannot cross scope into an ordinary global input") {
     REQUIRE(hasDiagnostic(result, DiagnosticCode::domainMismatch));
 }
 
+TEST_CASE("global output cannot feed a per-voice input") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(sourceSchema("test.global-source", NodeScope::global)));
+    REQUIRE(registry.registerSchema(sinkSchema("test.voice-sink", NodeScope::perVoice)));
+    const GraphSnapshot graph{
+        {node("global", "test.global-source"), node("voice", "test.voice-sink")},
+        {connection("global", "voice")},
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE_FALSE(result.graph.has_value());
+    REQUIRE(hasDiagnostic(result, DiagnosticCode::domainMismatch));
+}
+
 TEST_CASE("voice boundary accepts per-voice input and produces global output") {
     auto [registry, graph] = graphWithVoiceMix();
 

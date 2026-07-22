@@ -1,20 +1,43 @@
 #include <nodsynth/model/SchemaRegistry.h>
 
+#include <cmath>
+#include <exception>
 #include <set>
 #include <utility>
 
 namespace nodsynth::model {
+namespace {
+NodeScope resolveDomain(const NodeSchema& owner, const PortSchema& port) {
+    switch (port.domain) {
+        case PortDomain::perVoice: return NodeScope::perVoice;
+        case PortDomain::global: return NodeScope::global;
+        case PortDomain::sameAsNode: return owner.scope;
+    }
+    std::terminate();
+}
+
+bool hasValidDomain(const NodeSchema& owner, const PortSchema& port) {
+    const auto domain = resolveDomain(owner, port);
+    if (port.direction == PortDirection::output) return domain == owner.scope;
+    if (domain == owner.scope) return true;
+    return owner.scope == NodeScope::global && port.domain == PortDomain::perVoice;
+}
+} // namespace
+
 bool SchemaRegistry::registerSchema(NodeSchema schema) {
     if (schema.typeId.value.empty() || schema.schemaVersion == 0 || schema.sourceId.empty()) return false;
 
     std::set<PortId> portIds;
     for (const auto& port : schema.ports) {
-        if (port.id.value.empty() || port.channels == 0 || !portIds.insert(port.id).second) return false;
+        if (port.id.value.empty() || port.channels == 0 || !hasValidDomain(schema, port) ||
+            !portIds.insert(port.id).second) return false;
     }
 
     std::set<ParameterId> parameterIds;
     for (const auto& parameter : schema.parameters) {
-        if (parameter.id.value.empty() || parameter.minimum > parameter.defaultValue ||
+        if (parameter.id.value.empty() || std::isnan(parameter.minimum) ||
+            std::isnan(parameter.maximum) || !std::isfinite(parameter.defaultValue) ||
+            parameter.minimum > parameter.defaultValue ||
             parameter.defaultValue > parameter.maximum || !parameterIds.insert(parameter.id).second) return false;
         if (parameter.scale == ParameterScale::logarithmic && parameter.minimum <= 0.0) return false;
     }

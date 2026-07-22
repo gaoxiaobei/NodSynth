@@ -114,7 +114,7 @@ NodeSchema voiceMixSchema() {
         .ports = {
             {PortId{"voices"}, "Voices", PortDirection::input, PortKind::audio, 1,
              PortDomain::perVoice},
-            {PortId{"audio"}, "Audio", PortDirection::output, PortKind::audio, 1,
+            {PortId{"audio"}, "Audio", PortDirection::output, PortKind::audio, 2,
              PortDomain::sameAsNode},
         },
         .parameters = {},
@@ -131,7 +131,7 @@ NodeSchema audioOutputSchema() {
         .sourceId = "nodsynth",
         .scope = NodeScope::global,
         .ports = {
-            {PortId{"audio"}, "Audio", PortDirection::input, PortKind::audio, 1,
+            {PortId{"audio"}, "Audio", PortDirection::input, PortKind::audio, 2,
              PortDomain::sameAsNode},
         },
         .parameters = {},

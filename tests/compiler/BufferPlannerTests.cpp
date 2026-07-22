@@ -204,6 +204,41 @@ TEST_CASE("audio and control buffers use separate scope namespaces") {
     REQUIRE(controlAssignmentFor(*result.graph, {NodeId{"global-control"}, PortId{"control"}}).slot == 0);
 }
 
+TEST_CASE("voice mix preserves per-voice input and allocates its stereo output globally") {
+    SchemaRegistry registry;
+    REQUIRE(registry.registerSchema(schema(
+        "test.voice-source", NodeScope::perVoice,
+        {port("out", PortDirection::output, PortKind::audio)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.voice-mix", NodeScope::global,
+        {port("voices", PortDirection::input, PortKind::audio, 1, PortDomain::perVoice),
+         port("out", PortDirection::output, PortKind::audio, 2)})));
+    REQUIRE(registry.registerSchema(schema(
+        "test.audio-output", NodeScope::global,
+        {port("in", PortDirection::input, PortKind::audio, 2)})));
+    const GraphSnapshot graph{
+        {
+            node("source", "test.voice-source"),
+            node("mix", "test.voice-mix"),
+            node("output", "test.audio-output"),
+        },
+        {
+            connection("source", "out", "mix", "voices"),
+            connection("mix", "out", "output", "in"),
+        },
+    };
+
+    const auto result = GraphCompiler{}.compile(graph, registry);
+
+    REQUIRE(result.graph.has_value());
+    const auto& voice = audioAssignmentFor(*result.graph, {NodeId{"source"}, PortId{"out"}});
+    const auto& mixed = audioAssignmentFor(*result.graph, {NodeId{"mix"}, PortId{"out"}});
+    REQUIRE(voice.domain == NodeScope::perVoice);
+    REQUIRE(voice.channels == 1);
+    REQUIRE(mixed.domain == NodeScope::global);
+    REQUIRE(mixed.channels == 2);
+}
+
 TEST_CASE("event connections use slot zero without sample buffer assignments") {
     SchemaRegistry registry;
     REQUIRE(registry.registerSchema(schema(

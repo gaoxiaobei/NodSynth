@@ -94,3 +94,38 @@ TEST_CASE("a snapshot does not change with later edits") {
     REQUIRE(snapshot.nodes.front().parameters.empty());
     REQUIRE(editor.document().nodes().front().parameters.at(ParameterId{"gain"}) == 0.8);
 }
+
+TEST_CASE("a divergent edit invalidates redo history") {
+    GraphEditor editor;
+    REQUIRE(editor.addNode({NodeId{"first"}, NodeTypeId{"node"}, 1, {}, "{}", {}}));
+    REQUIRE(editor.addNode({NodeId{"abandoned"}, NodeTypeId{"node"}, 1, {}, "{}", {}}));
+    REQUIRE(editor.undo());
+
+    REQUIRE(editor.addNode({NodeId{"divergent"}, NodeTypeId{"node"}, 1, {}, "{}", {}}));
+    REQUIRE_FALSE(editor.redo());
+    REQUIRE(editor.document().findNode(NodeId{"abandoned"}) == nullptr);
+    REQUIRE(editor.document().findNode(NodeId{"divergent"}) != nullptr);
+}
+
+TEST_CASE("an identical duplicate connection is rejected") {
+    GraphEditor editor;
+    const Connection connection{{NodeId{"source"}, PortId{"out"}}, {NodeId{"sink"}, PortId{"in"}}};
+
+    REQUIRE(editor.connect(connection));
+    REQUIRE_FALSE(editor.connect(connection));
+    REQUIRE(editor.document().connections().size() == 1);
+    REQUIRE(editor.undo());
+    REQUIRE(editor.document().connections().empty());
+}
+
+TEST_CASE("undo erases a newly introduced parameter key and redo restores it") {
+    GraphEditor editor;
+    REQUIRE(editor.addNode({NodeId{"node"}, NodeTypeId{"gain"}, 1, {}, "{}", {}}));
+
+    REQUIRE(editor.setParameter(NodeId{"node"}, ParameterId{"gain"}, 0.8));
+    REQUIRE(editor.document().nodes().front().parameters.at(ParameterId{"gain"}) == 0.8);
+    REQUIRE(editor.undo());
+    REQUIRE_FALSE(editor.document().nodes().front().parameters.contains(ParameterId{"gain"}));
+    REQUIRE(editor.redo());
+    REQUIRE(editor.document().nodes().front().parameters.at(ParameterId{"gain"}) == 0.8);
+}
