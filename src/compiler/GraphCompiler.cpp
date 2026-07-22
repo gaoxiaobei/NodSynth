@@ -79,7 +79,6 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
     CompileResult result;
     NodeRecords nodes;
     NodeSchemas schemas;
-    std::set<model::NodeId> unsupportedVersions;
 
     for (const auto& node : graph.nodes) {
         nodes[node.id].push_back(&node);
@@ -102,7 +101,6 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
             if (node->schemaVersion != schema->schemaVersion) {
                 addError(result, DiagnosticCode::unsupportedSchemaVersion, node->id, std::nullopt,
                          "The node's schema version is not supported by the registered schema.");
-                unsupportedVersions.insert(node->id);
                 continue;
             }
 
@@ -134,21 +132,16 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
 
     std::set<model::Endpoint> connectedInputs;
     for (const auto* connection : connections) {
-        if (unsupportedVersions.contains(connection->from.nodeId) ||
-            unsupportedVersions.contains(connection->to.nodeId)) {
-            continue;
-        }
-
         const auto source = resolveEndpoint(connection->from, nodes, schemas, result);
         const auto target = resolveEndpoint(connection->to, nodes, schemas, result);
 
-        if (target && target->portSchema.direction == model::PortDirection::input &&
+        if (!source || !target) continue;
+
+        if (target->portSchema.direction == model::PortDirection::input &&
             !connectedInputs.insert(connection->to).second) {
             addError(result, DiagnosticCode::duplicateInputConnection, connection->to.nodeId, connection->to.portId,
                      "More than one connection writes to the same input port.");
         }
-
-        if (!source || !target) continue;
 
         if (source->portSchema.direction != model::PortDirection::output) {
             addError(result, DiagnosticCode::wrongPortDirection, connection->from.nodeId, connection->from.portId,

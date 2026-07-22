@@ -294,7 +294,10 @@ TEST_CASE("compiler returns all independent diagnostics in stable code node port
     REQUIRE(hasDiagnostic(first, DiagnosticCode::missingNodeType, NodeId{"z-missing-type"}));
     REQUIRE(hasDiagnostic(first, DiagnosticCode::unsupportedSchemaVersion, NodeId{"a-parameter"}));
     REQUIRE(hasDiagnostic(first, DiagnosticCode::unknownParameter, NodeId{"b-parameter"}));
-    REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::missingEndpointNode, NodeId{"absent"}, PortId{"input"}));
+    REQUIRE(hasDiagnostic(first, DiagnosticCode::missingEndpointNode, NodeId{"absent"}, PortId{"input"}));
+    REQUIRE(hasDiagnostic(first, DiagnosticCode::missingPort, NodeId{"b-parameter"}, PortId{"missing-b"}));
+    REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::missingPort, NodeId{"a-parameter"}, PortId{"missing-a"}));
+    REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::missingPort, NodeId{"a-parameter"}, PortId{"missing-z"}));
     REQUIRE_FALSE(hasDiagnostic(first, DiagnosticCode::parameterOutOfRange, NodeId{"a-parameter"}));
 }
 
