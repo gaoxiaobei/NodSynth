@@ -26,6 +26,18 @@ target_include_directories(nod_compiler PUBLIC include)
 target_link_libraries(nod_compiler PUBLIC nod_model)
 target_compile_features(nod_compiler PUBLIC cxx_std_20)
 
+if(NODSYNTH_BUILD_GRAPHCHECK OR NODSYNTH_BUILD_TESTS)
+  add_library(nod_graphcheck_scenarios apps/graphcheck/Scenarios.cpp)
+  target_include_directories(nod_graphcheck_scenarios PUBLIC apps/graphcheck)
+  target_link_libraries(nod_graphcheck_scenarios PUBLIC nod_compiler)
+  target_compile_features(nod_graphcheck_scenarios PUBLIC cxx_std_20)
+endif()
+
+if(NODSYNTH_BUILD_GRAPHCHECK)
+  add_executable(nod_graphcheck apps/graphcheck/Main.cpp)
+  target_link_libraries(nod_graphcheck PRIVATE nod_graphcheck_scenarios)
+endif()
+
 if(NODSYNTH_BUILD_TESTS)
   include(CTest)
   include(cmake/Dependencies.cmake)

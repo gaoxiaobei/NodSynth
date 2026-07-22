@@ -1,0 +1,20 @@
+name: core-ci
+on:
+  push:
+  pull_request:
+jobs:
+  core:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Show toolchain
+        run: cmake --version && ninja --version
+      - name: Configure
+        run: cmake --preset dev
+      - name: Build
+        run: cmake --build --preset dev --config Debug -j 2
+      - name: Test
+        run: ctest --preset dev -C Debug
