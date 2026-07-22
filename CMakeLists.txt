@@ -10,6 +10,8 @@ option(NODSYNTH_BUILD_GRAPHCHECK "Build the graph-checking CLI" ON)
 
 add_library(nod_model
   src/model/BuildInfo.cpp
+  src/model/GraphDocument.cpp
+  src/model/GraphEditor.cpp
   src/model/SchemaRegistry.cpp
 )
 target_include_directories(nod_model PUBLIC include)

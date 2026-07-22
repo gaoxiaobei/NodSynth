@@ -1,5 +1,6 @@
 add_executable(nod_tests
   model/BuildInfoTests.cpp
+  model/GraphEditorTests.cpp
   model/SchemaRegistryTests.cpp
 )
 target_link_libraries(nod_tests PRIVATE nod_model Catch2::Catch2WithMain)
