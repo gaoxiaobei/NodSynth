@@ -8,7 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(NODSYNTH_BUILD_TESTS "Build NodSynth tests" ON)
 option(NODSYNTH_BUILD_GRAPHCHECK "Build the graph-checking CLI" ON)
 
-add_library(nod_model src/model/BuildInfo.cpp)
+add_library(nod_model
+  src/model/BuildInfo.cpp
+  src/model/SchemaRegistry.cpp
+)
 target_include_directories(nod_model PUBLIC include)
 target_compile_features(nod_model PUBLIC cxx_std_20)
 
