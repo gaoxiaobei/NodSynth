@@ -27,6 +27,12 @@ struct Connection {
     auto operator<=>(const Connection&) const = default;
 };
 
+struct Viewport {
+    float originX{};
+    float originY{};
+    float zoom{1.f};
+};
+
 struct NodeRecord {
     NodeId id;
     NodeTypeId typeId;
@@ -34,6 +40,7 @@ struct NodeRecord {
     std::map<ParameterId, double> parameters;
     std::string opaqueStateJson;
     Point position;
+    std::string extensionsJson{"{}"};
 };
 
 struct GraphSnapshot {
@@ -47,11 +54,13 @@ public:
     [[nodiscard]] const std::vector<Connection>& connections() const noexcept { return connections_; }
     [[nodiscard]] GraphSnapshot snapshot() const { return {nodes_, connections_}; }
     [[nodiscard]] const NodeRecord* findNode(const NodeId& id) const noexcept;
+    [[nodiscard]] const Viewport& viewport() const noexcept { return viewport_; }
 
 private:
     friend class GraphEditor;
 
     std::vector<NodeRecord> nodes_;
     std::vector<Connection> connections_;
+    Viewport viewport_{};
 };
 } // namespace nodsynth::model

@@ -34,6 +34,7 @@ struct CompiledGraph {
     std::vector<model::NodeId> globalOrder;
     std::vector<BufferAssignment> audioBuffers;
     std::vector<BufferAssignment> controlBuffers;
+    std::uint32_t voiceBudget{0};
 };
 
 struct CompileResult {

@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 
+#include <nodsynth/nodes/BuiltinNodes.h>
+
 namespace nodsynth::graphcheck {
 namespace {
 using namespace nodsynth::compiler;
@@ -154,17 +156,7 @@ Connection connection(
     };
 }
 
-SchemaRegistry makeRegistry() {
-    SchemaRegistry registry;
-    registry.registerSchema(midiInputSchema());
-    registry.registerSchema(noteToFrequencySchema());
-    registry.registerSchema(oscillatorSchema());
-    registry.registerSchema(adsrSchema());
-    registry.registerSchema(gainSchema());
-    registry.registerSchema(voiceMixSchema());
-    registry.registerSchema(audioOutputSchema());
-    return registry;
-}
+SchemaRegistry makeRegistry() { return nodsynth::nodes::builtinRegistry(); }
 
 GraphSnapshot makeValidGraph() {
     return {

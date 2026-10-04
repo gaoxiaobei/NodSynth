@@ -23,4 +23,10 @@ public:
 private:
     CompilerLimits limits_;
 };
+
+[[nodiscard]] CompileResult previewConnection(
+    const model::GraphSnapshot& graph,
+    const model::SchemaRegistry& registry,
+    const model::Connection& connection,
+    CompilerLimits limits = {});
 } // namespace nodsynth::compiler

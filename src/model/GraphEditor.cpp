@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <utility>
@@ -17,6 +18,7 @@ bool GraphEditor::addNode(NodeRecord node) {
             const auto found = std::ranges::find(document.nodes_, id, &NodeRecord::id);
             document.nodes_.erase(found);
         },
+        ChangeKind::structure,
     });
     return true;
 }
@@ -52,6 +54,7 @@ bool GraphEditor::removeNode(const NodeId& id) {
                     document.connections_.begin() + static_cast<std::ptrdiff_t>(index), connection);
             }
         },
+        ChangeKind::structure,
     });
     return true;
 }
@@ -69,6 +72,7 @@ bool GraphEditor::connect(Connection connection) {
             const auto found = std::ranges::find(document.connections_, connection);
             document.connections_.erase(found);
         },
+        ChangeKind::structure,
     });
     return true;
 }
@@ -89,6 +93,7 @@ bool GraphEditor::disconnect(Connection connection) {
             document.connections_.insert(
                 document.connections_.begin() + static_cast<std::ptrdiff_t>(index), connection);
         },
+        ChangeKind::structure,
     });
     return true;
 }
@@ -115,8 +120,47 @@ bool GraphEditor::setParameter(const NodeId& id, const ParameterId& parameterId,
                 node->parameters.erase(parameterId);
             }
         },
+        ChangeKind::parameter,
     });
     return true;
+}
+
+bool GraphEditor::moveNode(const NodeId& id, Point position) {
+    const auto node = std::ranges::find(document_.nodes_, id, &NodeRecord::id);
+    if (node == document_.nodes_.end() || !std::isfinite(position.x) || !std::isfinite(position.y)) return false;
+
+    const Point previous = node->position;
+    commit({
+        [id, position](GraphDocument& document) {
+            const auto node = std::ranges::find(document.nodes_, id, &NodeRecord::id);
+            node->position = position;
+        },
+        [id, previous](GraphDocument& document) {
+            const auto node = std::ranges::find(document.nodes_, id, &NodeRecord::id);
+            node->position = previous;
+        },
+        ChangeKind::layout,
+    });
+    return true;
+}
+
+bool GraphEditor::setViewport(Viewport viewport) {
+    if (!std::isfinite(viewport.originX) || !std::isfinite(viewport.originY) || !std::isfinite(viewport.zoom) ||
+        viewport.zoom < 0.2f || viewport.zoom > 4.f) {
+        return false;
+    }
+    document_.viewport_ = viewport;
+    recentChange_ = ChangeKind::layout;
+    return true;
+}
+
+void GraphEditor::load(GraphSnapshot snapshot) {
+    document_.nodes_ = std::move(snapshot.nodes);
+    document_.connections_ = std::move(snapshot.connections);
+    undo_.clear();
+    redo_.clear();
+    ++structureRevision_;
+    recentChange_ = ChangeKind::structure;
 }
 
 bool GraphEditor::undo() {
@@ -127,6 +171,8 @@ bool GraphEditor::undo() {
     Edit edit = std::move(undo_.back());
     undo_.pop_back();
     edit.revert(document_);
+    recentChange_ = edit.kind;
+    if (edit.kind == ChangeKind::structure) ++structureRevision_;
     redo_.push_back(std::move(edit));
     return true;
 }
@@ -139,12 +185,16 @@ bool GraphEditor::redo() {
     Edit edit = std::move(redo_.back());
     redo_.pop_back();
     edit.apply(document_);
+    recentChange_ = edit.kind;
+    if (edit.kind == ChangeKind::structure) ++structureRevision_;
     undo_.push_back(std::move(edit));
     return true;
 }
 
 void GraphEditor::commit(Edit edit) {
     edit.apply(document_);
+    recentChange_ = edit.kind;
+    if (edit.kind == ChangeKind::structure) ++structureRevision_;
     redo_.clear();
     undo_.push_back(std::move(edit));
 }

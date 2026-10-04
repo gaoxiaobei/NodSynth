@@ -270,6 +270,7 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
     }
 
     result.graph.emplace();
+    result.graph->voiceBudget = limits_.maxVoices;
     result.graph->perVoiceOrder = std::move(perVoiceOrder);
     result.graph->globalOrder = std::move(globalOrder);
     result.graph->audioBuffers = std::move(buffers.audio);
@@ -295,5 +296,15 @@ CompileResult GraphCompiler::compile(const model::GraphSnapshot& graph, const mo
         result.graph->connections.push_back({*connection, kind, slot});
     }
     return result;
+}
+
+CompileResult previewConnection(
+    const model::GraphSnapshot& graph,
+    const model::SchemaRegistry& registry,
+    const model::Connection& connection,
+    CompilerLimits limits) {
+    auto copy = graph;
+    copy.connections.push_back(connection);
+    return GraphCompiler{limits}.compile(copy, registry);
 }
 } // namespace nodsynth::compiler

@@ -6,10 +6,17 @@ add_executable(nod_tests
   model/BuildInfoTests.cpp
   model/GraphEditorTests.cpp
   model/SchemaRegistryTests.cpp
+  model/LayoutTests.cpp
+  persist/ProjectFileTests.cpp
+  runtime/RuntimeTests.cpp
 )
-target_link_libraries(nod_tests PRIVATE nod_model nod_graphcheck_scenarios Catch2::Catch2WithMain)
+target_link_libraries(nod_tests PRIVATE nod_model nod_nodes nod_persist nod_graphcheck_scenarios Catch2::Catch2WithMain)
 include(Catch)
 catch_discover_tests(nod_tests)
+
+add_executable(nod_alloc_probe runtime/AllocProbe.cpp)
+target_link_libraries(nod_alloc_probe PRIVATE nod_nodes)
+add_test(NAME runtime.no-allocation COMMAND nod_alloc_probe)
 
 if(NODSYNTH_BUILD_GRAPHCHECK)
   function(add_graphcheck_scenario_test name scenario expected_result expected_stdout expected_stderr)
