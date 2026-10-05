@@ -19,6 +19,7 @@ struct PresetInfo {
     std::vector<std::string> tags;
     std::string patchPath;
     std::string hash;
+    persist::Json parameters{persist::Json::array()};
 };
 
 struct PresetAuditionOptions {

@@ -6,6 +6,8 @@
 
 #include <nodsynth/midi/Smf.h>
 #include <nodsynth/render/OfflineRenderer.h>
+#include <nodsynth/song/AudioExport.h>
+#include <nodsynth/song/Automation.h>
 
 namespace nodsynth::song {
 namespace {
@@ -26,6 +28,8 @@ const char* kOpenHatTags[] = {"drums", "hat", "open", "percussion"};
 const char* kBassTags[] = {"bass", "synth"};
 const char* kLeadTags[] = {"lead", "synth", "melody"};
 const char* kPadTags[] = {"pad", "synth", "harmony"};
+const char* kTranceTags[] = {"trance", "synth"};
+const char* kHouseTags[] = {"house", "synth"};
 
 const CatalogEntry kCatalog[] = {
     {"kick", 1, "kick", "Analog Kick", kKickTags, 3, "kick.json"},
@@ -35,6 +39,11 @@ const CatalogEntry kCatalog[] = {
     {"bass", 1, "bass", "Saw Bass", kBassTags, 2, "bass.json"},
     {"lead", 1, "lead", "Square Lead", kLeadTags, 3, "lead.json"},
     {"pad", 1, "pad", "Soft Pad", kPadTags, 3, "pad.json"},
+    {"trance-lead", 1, "lead", "Trance Layered Detuned Saw", kTranceTags, 2, "trance-lead.json"},
+    {"trance-bass", 1, "bass", "Trance Offbeat Saw Bass", kTranceTags, 2, "trance-bass.json"},
+    {"trance-pad", 1, "pad", "Trance Saw Pad", kTranceTags, 2, "trance-pad.json"},
+    {"house-bass", 1, "bass", "House Square Bass", kHouseTags, 2, "house-bass.json"},
+    {"house-chord", 1, "pad", "House Chord Stab", kHouseTags, 2, "house-chord.json"},
 };
 
 PresetInfo fromEntry(const CatalogEntry& entry, const std::filesystem::path& presetsRoot) {
@@ -46,6 +55,8 @@ PresetInfo fromEntry(const CatalogEntry& entry, const std::filesystem::path& pre
     info.patchPath = entry.file;
     info.tags.assign(entry.tags, entry.tags + entry.tagCount);
     info.hash = hashFile(presetsRoot / entry.file);
+    std::string error;
+    if (auto graph = render::loadPatch(presetsRoot / entry.file, error)) info.parameters = parametersJson(*graph);
     return info;
 }
 
@@ -90,7 +101,7 @@ midi::File auditionMidi(const PresetAuditionOptions& options) {
 
 std::filesystem::path defaultPresetsRoot() {
     if (const char* env = std::getenv("NODSYNTH_PRESETS"); env != nullptr && env[0] != '\0') return env;
-    return std::filesystem::current_path() / "presets";
+    return std::filesystem::path(NOD_BUILTIN_PRESETS);
 }
 
 std::vector<PresetInfo> listPresets(const std::filesystem::path& presetsRoot, std::optional<std::string> role) {
@@ -119,6 +130,10 @@ persist::Json presetJson(const PresetInfo& info) {
     json.set("tags", std::move(tags));
     json.set("patchPath", persist::Json::string(storedPatchPath(info)));
     json.set("hash", persist::Json::string(info.hash));
+    json.set("parameters", info.parameters);
+    json.set("dependencies", persist::Json::array());
+    json.set("auditionStatus", persist::Json::string("unheard"));
+    json.set("levelPolicy", persist::Json::string("patch levels reserve headroom; use representative audition to measure actual peak"));
     return json;
 }
 
@@ -147,7 +162,15 @@ bool bindPreset(
         error = "preset patch file is missing";
         return false;
     }
-    return bindPatch(song, trackId, storedPatchPath(*found), file, error);
+    const auto absolute = std::filesystem::absolute(file).u8string();
+    if (!bindPatch(song, trackId, {reinterpret_cast<const char*>(absolute.data()), absolute.size()}, file, error)) return false;
+    for (auto& resource : song.resources) {
+        if (resource.path == std::string(reinterpret_cast<const char*>(absolute.data()), absolute.size())) {
+            resource.presetId = found->id;
+            resource.presetVersion = found->version;
+        }
+    }
+    return true;
 }
 
 render::RenderReport renderPresetAudition(
@@ -173,6 +196,14 @@ render::RenderReport renderPresetAudition(
     renderOptions.tailSeconds = options.tailSeconds;
     renderOptions.tailMode = render::TailMode::fixed;
     renderOptions.patchHash = found->hash;
-    return render::renderMidi(*graph, auditionMidi(options), renderOptions, outputWav);
+    auto rendered = render::renderMidi(*graph, auditionMidi(options), renderOptions, outputWav);
+    if (rendered.ok) {
+        runtime::WavData audio;
+        double gain = 1;
+        if (!runtime::readWav(outputWav, audio, error) || !writePcm16(outputWav, audio, false, gain, error)) {
+            rendered.ok = false; rendered.code = "export-failed"; rendered.message = error;
+        }
+    }
+    return rendered;
 }
 } // namespace nodsynth::song

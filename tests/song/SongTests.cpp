@@ -279,7 +279,7 @@ TEST_CASE("three NodSynth tracks share a timeline and stems sum to the mix", "[s
     missing.resources[0].hash.clear();
     const auto rejected = song::renderSong(missing, options, root / "missing.wav", {});
     REQUIRE_FALSE(rejected.ok);
-    REQUIRE(rejected.code == "missing-patch");
+    REQUIRE(rejected.code == "missing-resource");
     REQUIRE_FALSE(std::filesystem::exists(root / "missing.wav"));
 
     imported.song.tracks[0].gainAutomation.push_back({0, 0.0});
@@ -374,6 +374,7 @@ TEST_CASE("NodSynth and FluidSynth share one timeline", "[song]") {
     REQUIRE(song::bindPatch(imported.song, imported.song.tracks[0].id, patch.string(), patch, error));
     REQUIRE(song::bindExternal(imported.song, imported.song.tracks[1].id, "fluidsynth", soundfont.string(), soundfont, error));
     imported.song.tracks[1].clips[0].notes.push_back({"note-late", 4800, 240, 72, 100, imported.song.tracks[1].clips[0].notes.front().channel});
+    imported.song.tracks[1].clips[0].length = 5040;
     const auto late = song::sampleAtTick(imported.song, 4800, 48000);
     REQUIRE(late.has_value());
 
@@ -483,6 +484,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     REQUIRE(song.tracks[0].clips[0].notes[0].pitch == 72);
     auto batch = proposal.batch;
     batch.set("requestId", persist::Json::string("arrange-1"));
+    batch.set("diffDetail", persist::Json::string("notes"));
     const auto applied = song::applyCommands(song, batch, 1);
     REQUIRE(applied.ok);
     REQUIRE(applied.revision == 2);
@@ -509,7 +511,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     auto loaded = song::loadSong(songPath, error);
     REQUIRE(loaded);
     REQUIRE(song::undoSong(*loaded).ok);
-    REQUIRE(loaded->revision == 1);
+    REQUIRE(loaded->revision == 3);
     const auto restored = std::find_if(loaded->tracks[1].clips[0].notes.begin(), loaded->tracks[1].clips[0].notes.end(), [](const song::Note& note) {
         return note.id == "bass-4";
     });
@@ -517,7 +519,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     REQUIRE(restored->pitch == 36);
     REQUIRE(loaded->tracks[2].clips[0].notes.empty());
     REQUIRE(song::redoSong(*loaded).ok);
-    REQUIRE(loaded->revision == 2);
+    REQUIRE(loaded->revision == 4);
     REQUIRE_FALSE(loaded->tracks[2].clips[0].notes.empty());
     const auto replay = song::applyCommands(*loaded, batch, 2);
     REQUIRE(replay.ok);
@@ -531,7 +533,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     options.previewEndTick = 9000;
     const auto preview = song::renderSong(*loaded, options, root / "preview.wav", root / "preview-stems");
     REQUIRE(preview.ok);
-    REQUIRE(preview.revision == 2);
+    REQUIRE(preview.revision == 4);
     REQUIRE(preview.quality == "final");
     REQUIRE(preview.auditionStatus == "unheard");
     REQUIRE_FALSE(preview.cacheHit);
@@ -567,7 +569,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     full.previewEndTick.reset();
     const auto mix = song::renderSong(*loaded, full, root / "mix.wav", root / "stems");
     REQUIRE(mix.ok);
-    REQUIRE(mix.revision == 2);
+    REQUIRE(mix.revision == 4);
     REQUIRE(mix.stems.size() == 3);
     REQUIRE(song::exportMidi(*loaded, root / "song.mid", error));
     const auto midiFile = midi::parseFile(root / "song.mid");
@@ -737,7 +739,7 @@ TEST_CASE("VST3 parameter automation changes the rendered level", "[song]") {
     clip.notes.push_back({"n1", 0, 1920, 60, 100, 0});
     track.clips.push_back(std::move(clip));
     song::ParameterLane lane;
-    lane.id = "Gain";
+    lane.id = "vst3:0";
     lane.points.push_back({0, 0.0});
     lane.points.push_back({960, 1.0});
     track.parameterAutomation.push_back(std::move(lane));
@@ -760,6 +762,13 @@ TEST_CASE("VST3 parameter automation changes the rendered level", "[song]") {
     const auto late = rms(wav, 50000, 70000);
     REQUIRE(late > 0.02);
     REQUIRE(late > early * 4.0);
+    const auto middle = rms(wav, 22000, 28000);
+    REQUIRE(middle > early * 2.0);
+    REQUIRE(middle < late);
+    song.tracks[0].parameterAutomation[0].id = "Gain";
+    const auto legacy = song::renderSong(song, options, root / "legacy.wav", {});
+    REQUIRE(legacy.ok);
+    REQUIRE(song::hashFile(root / "legacy.wav") == song::hashFile(mix));
     std::filesystem::remove_all(root);
 }
 
@@ -824,7 +833,7 @@ TEST_CASE("reported plugin latency is removed so the note stays on the downbeat"
 #endif
 
 TEST_CASE("parameter automation round-trips through the song command", "[song]") {
-    song::SongDocument song;
+    auto song = song::createSong({});
     song.ppq = 480;
     song::Track track;
     track.id = "lead";
@@ -932,12 +941,12 @@ TEST_CASE("a model adapter proposes an edit without changing the song until it i
 TEST_CASE("preset catalog lists roles and can bind and audition a kick", "[song][preset]") {
     const std::filesystem::path presetsRoot = NOD_PRESETS_ROOT;
     const auto listed = song::listPresets(presetsRoot);
-    REQUIRE(listed.size() == 7);
+    REQUIRE(listed.size() == 12);
     REQUIRE(song::findPreset(presetsRoot, "kick"));
     REQUIRE(song::findPreset(presetsRoot, "snare-clap")->role == "clap");
     REQUIRE(song::listPresets(presetsRoot, "hat").size() == 2);
     const auto json = song::listJson(listed);
-    REQUIRE(json.find("count")->asNumber() == 7);
+    REQUIRE(json.find("count")->asNumber() == 12);
 
     song::SongDocument song;
     song.ppq = 480;
@@ -959,7 +968,7 @@ TEST_CASE("preset catalog lists roles and can bind and audition a kick", "[song]
     song.tracks.push_back(std::move(track));
     std::string error;
     REQUIRE(song::bindPreset(song, "kick", "kick", presetsRoot, error));
-    REQUIRE(song.resources.front().path == "presets/kick.json");
+    REQUIRE(std::filesystem::path(song.resources.front().path).is_absolute());
     REQUIRE_FALSE(song.resources.front().hash.empty());
 
     const auto wavPath = tempPath("nodsynth-preset-kick.wav");
@@ -1020,7 +1029,7 @@ TEST_CASE("create song, name tracks, and mix edits produce a semantic diff", "[s
     mix.set("commands", std::move(mixCommands));
     const auto mixed = song::applyCommands(song, mix, song.revision);
     REQUIRE(mixed.ok);
-    REQUIRE(mixed.diff.find("changedEntityCount")->asNumber() >= 2);
+    REQUIRE(mixed.diff.find("changedEntityCount")->asNumber() == 2);
     bool sawGain = false;
     for (const auto& change : mixed.diff.find("changes")->asArray()) {
         if (change.find("field")->asString() == "gain") sawGain = true;

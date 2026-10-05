@@ -299,7 +299,7 @@ void RuntimePlan::fillParameter(std::uint32_t index, float value) {
     if (!parameter.smooth) parameter.current = parameter.target;
 }
 
-void RuntimePlan::renderParameters(std::uint32_t frames) {
+void RuntimePlan::renderParameters(std::uint32_t frames, std::span<const ParameterEvent> direct, std::uint32_t origin) {
     if (overflow_.exchange(false, std::memory_order_acq_rel)) queue_.discardAll();
     drained_.clear();
     ParamEvent event;
@@ -316,10 +316,17 @@ void RuntimePlan::renderParameters(std::uint32_t frames) {
     }
     sortEvents(drained_);
     std::size_t cursor = 0;
+    std::size_t directCursor = 0;
+    while (directCursor < direct.size() && direct[directCursor].sampleOffset < origin) ++directCursor;
     for (std::uint32_t frame = 0; frame < frames; ++frame) {
         while (cursor < drained_.size() && drained_[cursor].sampleOffset <= frame) {
             fillParameter(drained_[cursor].index, drained_[cursor].value);
             ++cursor;
+        }
+        while (directCursor < direct.size() && direct[directCursor].sampleOffset <= origin + frame) {
+            if (direct[directCursor].index < parameters_.size())
+                fillParameter(direct[directCursor].index, direct[directCursor].value);
+            ++directCursor;
         }
         for (std::uint32_t index = 0; index < parameters_.size(); ++index) {
             auto& parameter = parameters_[index];
@@ -339,9 +346,10 @@ void RuntimePlan::renderParameters(std::uint32_t frames) {
     }
 }
 
-void RuntimePlan::process(const VoiceAllocator& voices, float* mixLeft, float* mixRight, std::uint32_t frames) {
+void RuntimePlan::process(const VoiceAllocator& voices, float* mixLeft, float* mixRight, std::uint32_t frames,
+                          std::span<const ParameterEvent> parameters, std::uint32_t origin) {
     frames = std::min(frames, maxFrames_);
-    renderParameters(frames);
+    renderParameters(frames, parameters, origin);
     for (std::uint32_t voice = 0; voice < voiceCount_; ++voice) {
         for (auto& program : perVoice_) program.node->process(voice, frames);
         for (auto& program : perVoice_) {

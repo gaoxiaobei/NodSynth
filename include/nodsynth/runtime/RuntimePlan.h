@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <span>
 #include <vector>
 
 #include <nodsynth/compiler/CompiledGraph.h>
@@ -15,6 +16,11 @@
 #include <nodsynth/runtime/VoiceAllocator.h>
 
 namespace nodsynth::runtime {
+struct ParameterEvent {
+    std::uint32_t sampleOffset{0};
+    std::uint32_t index{0};
+    float value{0.f};
+};
 struct PlanResult {
     std::unique_ptr<class RuntimePlan> plan;
     PrepareError error{PrepareError::none};
@@ -38,7 +44,8 @@ public:
     RuntimePlan(const RuntimePlan&) = delete;
     RuntimePlan& operator=(const RuntimePlan&) = delete;
 
-    void process(const VoiceAllocator& voices, float* mixLeft, float* mixRight, std::uint32_t frames);
+    void process(const VoiceAllocator& voices, float* mixLeft, float* mixRight, std::uint32_t frames,
+                 std::span<const ParameterEvent> parameters = {}, std::uint32_t origin = 0);
     bool enqueueParameter(std::uint32_t index, float value, std::uint32_t sampleOffset);
     [[nodiscard]] std::optional<std::uint32_t> findParameter(
         const model::NodeId& node,
@@ -91,7 +98,7 @@ private:
         ParamView parameters{};
     };
 
-    void renderParameters(std::uint32_t frames);
+    void renderParameters(std::uint32_t frames, std::span<const ParameterEvent> parameters, std::uint32_t origin);
     void fillParameter(std::uint32_t index, float value);
 
     double sampleRate_{48000.0};

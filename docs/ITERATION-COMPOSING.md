@@ -1,8 +1,12 @@
 # 编曲工作台迭代：从能渲染到顺畅创作
 
-日期：2026-10-05。源码基线：实现批次。状态：A/B/C 已落地。C 含成品 mix 裁片、轨道 dry 缓存与仅改 gain/pan 重混音、耗时拆分、可解释静音、`nod compare`（可选响度匹配）以及 render 报告中的 quality/renderId/auditionStatus（默认 unheard）。公开命令复测（128 BPM、16 小节、6 轨）：Dev 冷全曲约 34 s、裁片约 16 ms、暖重混音约 181 ms；同一台机器 Release 冷全曲约 5.76 s、裁片约 5 ms、暖重混音约 50 ms（相对冷全曲约 115×，满足 ≤2 s 且 ≥5×）。联合渲染由测试 `NodSynth and FluidSynth share one timeline` 覆盖（已通过）。人工鼓听感仍需人耳验收，峰值/LUFS 不代替。
+日期：2026-10-05。源码基线：实现批次。状态：A/B/C 已落地。A/B/C 之后的真实曲风复测与开发建议见 [Agent 编曲体感建议](AGENT-COMPOSING-FEEDBACK.md)。C 含成品 mix 裁片、轨道 dry 缓存与仅改 gain/pan 重混音、耗时拆分、可解释静音、`nod compare`（可选响度匹配）以及 render 报告中的 quality/renderId/auditionStatus（默认 unheard）。公开命令复测（128 BPM、16 小节、6 轨）：Dev 冷全曲约 34 s、裁片约 16 ms、暖重混音约 181 ms；同一台机器 Release 冷全曲约 5.76 s、裁片约 5 ms、暖重混音约 50 ms（相对冷全曲约 115×，满足 ≤2 s 且 ≥5×）。联合渲染由测试 `NodSynth and FluidSynth share one timeline` 覆盖（已通过）。人工鼓听感仍需人耳验收，峰值/LUFS 不代替。
 
-## 本轮目标
+## 当前与历史范围
+
+A/B/C 的实现与既有测量保留如下。后文 I1–I5、首次反馈表及 A/B/C 验收剧本是第一轮设计基线，不表示这些问题今天仍全部存在。**当前排期以文末“第二轮：选择性纳入 trance 复测反馈”为准**；原始体验报告保留为证据，不直接作为全部必须实现的需求。
+
+## 第一轮目标（A/B/C）
 
 以 Agent 制作《小星星 DJ 版》的实际体验为依据，将产品推进到：**从空白工程建轨、选音色、编排、检查修改、快速试听和导出，全程使用公开接口，不需要生成中间 SMF 或手写节点图 JSON。**
 
@@ -158,3 +162,79 @@ nod song query twinkle.json --view tracks --json
 最终通过条件：从零创建、命名、复制编排；每次实际修改可审阅；查询只取所需数据；能够选用合适鼓预设；改混音无需全曲重合成；导出 mix/stems/报告并明确是否试听。另做一次两种合成器联合渲染回归，不能只在纯 NodSynth 示范中通过。
 
 本轮暂缓新插件格式、商店、录音/拉伸、复杂鼓架、通用 DSP 快照、自动“审美打分”和大规模 UI 改版。先让已有能力成为可靠、容易操作的编曲工作台。
+
+## 第二轮：选择性纳入 trance 复测反馈
+
+设计日期：2026-10-05。依据 [Agent 复测反馈](AGENT-COMPOSING-FEEDBACK.md)，并检查资源绑定、语义 diff 与渲染代码。以下设计增量已实现，自动验收与性能复测已完成，人工音乐质量试听待确认；既有创作产物保留。交付证据见 [D0–D2 验收记录](history/COMPOSING-2026-10-05.md)，操作见 [命令指南](COMPOSING-COMMANDS.md)。
+
+### 取舍与优先级
+
+| 建议 | 决定 | 理由与边界 |
+|---|---|---|
+| 资源路径统一、工程可搬移 | D0 优先纳入 | 是正确性问题；默认复制资源，不使用 junction 作为交付方案 |
+| 大批量 diff 摘要 | D0 优先纳入 | 统计嵌套对象，不通过完整 dump 数百音符解决 |
+| NodSynth 参数自动化 | D0 先禁止静默忽略，D1 完成执行 | 接受命令却不改变声音，比少一个预设更容易误导 Agent |
+| PCM16 与试听记录 | D1 调整后纳入 | 保留 float32 母带默认值，增加便捷 PCM16 试听产物；播放启动不等于已听 |
+| pattern、移调、力度、和弦 | D2 缩小后纳入 | 先实现确定、可展开的编辑糖，不增加长期运行的生成器或完整乐理系统 |
+| 曲风预设及宏参数 | D2 纳入 | 宏绑定与自动化先可靠，再提供精简 trance 包；house 用作泛化复测 |
+| 按轨并行与更多 DSP | 后置，按测量/试听选择 | 暖重混已远超目标；不同时建设混响、压缩器和新调度器 |
+| preset import、工程模板 | 后置 | 先统一资源绑定与可搬移，再扩展 registry 管理与模板，模板不得依赖 junction |
+| 响度归一化 | 后置 | -18 LUFS 不是错误；需先有校准测量、true-peak/限幅策略及输出报告 |
+
+不采纳“当天可修”的工期判断；资源事务和兼容测试完成后再估计。也不将 float32 WAV 普遍判定为不可播放，只记录本次播放器的兼容问题。
+
+### D0：修正资源与编辑反馈的可靠性
+
+**统一路径契约。** 工程中 resource.path 的相对路径一律相对 Song 文件所在目录。apply/validate/render/GUI 使用同一资源解析服务，显式传入工程目录；不能修改进程 CWD 代替上下文。`set-instrument` 的相对路径也按此规则解释；如需从 CWD 导入，提供显式 pathBase/sourceBase 选项，或先传绝对源路径。禁止“Song 目录找不到就试 CWD”的隐式回退。
+
+源码中 `set-instrument` 目前直接拿命令路径计算 hash，渲染却使用 `baseDirectory`；`bindPreset` 计算 registry 文件 hash 后存入另一条工程路径。这与反馈一致。
+
+**默认自包含。** `bind-preset` 将固定版本及所需依赖复制到工程的 `assets/presets/`，使用版本和内容哈希避免同名覆盖，存相对路径和原始 preset ID/version/hash。自定义 Patch 也提供同一 collect/copy 路径。显式外部引用可以保留，但 validate 标记 non-portable；插件二进制不自动复制，SoundFont/采样等资产按明确的收集选项及分发权限处理，不能把所有工程都宣称完全自包含。
+
+资源复制先暂存和校验，再提交引用；dry-run 不创建正式资源，失败批次不留下指向半成品的工程，重复 requestId 不重复复制。通过内容寻址与原子文件提交保证中断后旧工程仍有效，未引用暂存文件可清理。撤销先移除引用，不删除其他修订或工程可能使用的资源。
+
+诊断区分 missing/unreadable/hash-mismatch，包含 resourceId、原始路径、pathBase、resolvedPath、expectedHash 和 actualHash；无可读文件时 actualHash 为 null，不能假装是哈希不匹配。已有 junction 工程提供显式 collect/migrate 操作，不静默重写用户资源。
+
+**准确但紧凑的 diff。** 当前新增轨道分支直接 continue，跳过其子片段/音符；`changedEntityCount` 实际近似差异条目数，而非唯一实体数。增加 schemaVersion、changeRecordCount、按 entity 分类的 added/removed/modified 计数，以及每轨 notesSummary（数量、起止、删除/变化数量）。父轨被新增也须统计子实体；每个实体 ID 在同一分类只计一次。明确 changedEntityCount 新语义并提供兼容字段，避免旧消费者误读。
+
+默认摘要不展开音符；显式 diff detail/notes 选项返回完整数据或分页引用。可选 `snapshot.summary` 复用 query summary，并绑定提交后的 revision。invalidateRange 是保守的声音影响范围：删除/移动同时覆盖旧、新位置；有状态 DSP、尾音和 tempo 变化可能要求扩展到后续，不强求等于音符包围盒。检查全量 tempo/拍号点的变化，不能只比较首点与数组长度。
+
+**自动化先诚实声明。** 目前 lane 被整理后主要送入 VST3 工作进程，内嵌 NodSynth 尚无对应消费路径。D1 完成前 capabilities 不声明该后端已支持；render-ready 校验明确拒绝无法执行的 lane。编辑草稿可保留 lane 并显示诊断，不能把它静默渲染成静态音色。
+
+**D0 验收：** 从仓库根、工程目录和其他目录操作同一 Song 结果一致；复制已收集的工程目录后不依赖原 registry/junction 仍可渲染；覆盖带空格/中文路径、同名不同内容、缺失/变更资产、失败事务和请求重放。一次新增多轨及 602 音符的 apply 摘要计数可核对，删除父轨统计完整；同长度 tempo map 中间点变化可见。未知或未支持参数自动化明确失败。
+
+### D1：参数确实改变声音，试听确实可交接
+
+**统一 lane 语义，保留后端单位。** 为 NodSynth 参数定义稳定 nodeId/parameterId 地址，预设宏使用稳定 macroId 映射；VST3 参数继续保留原稳定 ID。参数元数据声明单位、范围、值域（physical/normalized）、可自动化性和 step/linear 插值。不能将 cutoff Hz 当作 VST3 的 0–1 值，也不能对旧 lane 静默改单位；必要时版本化迁移。
+
+离线调度在准确 sample offset 应用事件，明确同刻事件顺序、首点之前使用基础值、末点后保持及平滑规则。事件容量预检，不在音频处理路径临时分配；不可只在块边界调用 UI 调参接口。宏的多个目标按声明映射同步更新，重绑不兼容 Patch 时给出失效地址，而不是忽略。
+
+首批只承诺现有 DSP 真正暴露的 cutoff 和 level；delay mix 等先核对节点是否有相应参数，没有就不在 capabilities 或预设宏中宣称。自动化属于乐器输出依赖，必须使该轨 dry 缓存失效；轨道 gain/pan 仍只触发重混音。局部试听继续正确预跑。
+
+**D1 自动化验收：** 一个静态输入音色的 cutoff 扫频在频谱上可测，且有/无 lane 的 WAV 明确不同；参数落点测试覆盖跨块及 64/128/512 块长。fresh/cached、全曲裁切/局部预跑在容差内一致；只改 lane 会重渲正确轨道；与 VST3 的插值/时间约定一致，不要求两种乐器波形相同。
+
+**输出与试听状态。** 保持现有 float32 渲染默认值和缓存精度，新增显式 `--format pcm16`，并提供一次渲染同时生成 `.preview.wav` 的选项。面向试听的命令默认 PCM16，母带输出不降精度。量化仅发生在导出阶段，报告编码、抖动方案/seed、超范围采样处理；默认拒绝静默硬削波，用户显式选择衰减/限幅策略。导出格式变化可重用 float 缓存。
+
+提供打开已有试听文件的稳定入口（优先复用现有播放能力），如新增 `nod play`，失败必须报设备/播放器问题。audition 记录独立于不可变 render manifest，引用 renderId、文件内容哈希、区间、评价者与时间。打开成功仅标记 playbackStarted；只有人明确确认才记录 heard，heard 也不等于 approved。换了音频产物默认 unheard；旧产物的听感记录保留，不冒充新版本评价。
+
+**D1 试听验收：** 本机默认播放器能打开 PCM16 试听产物；float 母带和兼容预览分别标识；无人确认时保持 unheard；明确确认后能查询记录，重渲不同音频不继承 heard。报告持续区分 metrics、agentHypothesis 和 audition。
+
+### D2：用乐句表达编排，用宏调整曲风
+
+首批纳入 add-pattern、transpose-notes、scale-velocities，以及按小节复制片段。pattern 仅支持显式拍长/网格、offset、范围、音高和力度序列；音符时值与网格间隔分别指定。底层一次展开为普通 clip/notes，拥有独立稳定 ID，可撤销、可 diff、幂等重试，不引入可变共享循环引用。
+
+节拍与时值用精确分数，定义 `1/4` 为四分音符而不是四分之一拍；小节遵循拍号图，跨拍号变化逐段展开。无法在工程 PPQ 精确表示时明确报错或要求显式量化。默认不隐式 humanize；以后加入随机变化必须有 seed。
+
+和弦辅助先支持根 MIDI 音高、major/minor、转位、显式 octave/voicing，其他和弦品质按实际实现扩展；暂缓 degree 调式推导、自动和声与 groove 模型。`pump` 可生成普通 gain lane，不能称为基于音频检测的侧链压缩。首批可用生成命令批次完成，不必同时增加另一套 gen-pattern CLI。允许 Agent 用脚本生成公开 commands JSON；禁止的是绕开接口改私有工程或先造 SMF 作为必要入口。
+
+曲风包先提供精简的 trance lead/bass/pad，加现有可用鼓音色，必要时增加 house 对应角色。每个预设附版本、tags、宏映射、代表性试听、音量余量和依赖；`supersaw` 等名称必须符合实际 DSP，不用标签掩盖缺失能力。优先复用现有振荡器组合；只有试听证实不足才引入 detune/unison。混响、chorus、侧链压缩器不作为整包同时开工项。
+
+**D2 验收：** 不列逐 tick 音符即可表达 16 小节四拍底鼓、反拍低音和 Am–F–C–G 和弦；17 小节场景额外验证尾部非整循环边界。复制与移调后原片段不变，范围/越界/力度限制有明确行为。只使用 registry 预设及公开宏完成 trance 主验收，再做一个小型 house 对照，避免只为单首示范硬编码。曲风辨识和质量由人试听，尚无试听则标记待验收。
+
+### 第二轮发布与保持项
+
+顺序为 **D0 资源/反馈正确性 → D1 自动化与试听 → D2 乐句和曲风**，每批独立交付。C 批暖缓存已显著达标，先保持，不把按轨并行或外部冻结作为此轮额外门槛；每轨 dspMs 可随诊断改进纳入，实际瓶颈明确后再排并行。
+
+复测从仓库根目录开始，138 BPM、16 小节、至少 7 轨 trance；补 17 小节边界测试与短 house 对照。检查工程搬移、批量摘要、cutoff 自动化、可播放预览与人工确认。保持 summary <8 KiB 的既定规模门槛和暖重混 ≤2 秒且较冷渲 ≥5×，并回归外部合成器、MIDI 导入、撤销和既有工程加载。
+
+原始反馈与 `compositions/trance-drop/` 只作为证据保留，另建验收产物，不覆写创作文件。验收记录分别列 automated passed、试听待办/结果和已知限制；“已渲染”不再同时代表“可搬移”“自动化生效”或“听感达标”。

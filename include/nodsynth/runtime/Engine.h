@@ -45,7 +45,8 @@ public:
         float* const* outputs,
         std::uint32_t channels,
         std::uint32_t frames,
-        std::span<const MidiEvent> midi);
+        std::span<const MidiEvent> midi,
+        std::span<const ParameterEvent> parameters = {});
     void reclaim();
     [[nodiscard]] Telemetry telemetry() const;
     [[nodiscard]] const RuntimePlan* activePlan() const noexcept;
@@ -53,7 +54,8 @@ public:
 private:
     void retire(RuntimePlan* plan) noexcept;
     void installPending() noexcept;
-    void renderPlan(RuntimePlan& plan, float* left, float* right, std::uint32_t frames);
+    void renderPlan(RuntimePlan& plan, float* left, float* right, std::uint32_t frames,
+                    std::span<const ParameterEvent> parameters = {}, std::uint32_t origin = 0);
     [[nodiscard]] std::uint64_t residentBytes() const noexcept;
 
     EngineConfig engineConfig_{};

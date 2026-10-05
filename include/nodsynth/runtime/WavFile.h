@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -14,6 +15,8 @@ struct WavData {
     std::uint32_t sampleRate{0};
     std::uint32_t channels{0};
     std::vector<float> interleaved;
+    std::uint16_t encoding{3};
+    std::uint16_t bitsPerSample{32};
 };
 
 inline void writeLe16(std::ostream& out, std::uint16_t value) {
@@ -80,6 +83,11 @@ inline bool readWavHeader(std::istream& in, WavData& wav, std::uint32_t& dataByt
     wav.channels = header[22] | (static_cast<std::uint32_t>(header[23]) << 8);
     wav.sampleRate = readLe32(header + 24);
     dataBytes = readLe32(header + 40);
+    wav.encoding = header[20] | (static_cast<std::uint16_t>(header[21]) << 8);
+    wav.bitsPerSample = header[34] | (static_cast<std::uint16_t>(header[35]) << 8);
+    if ((wav.encoding != 3 || wav.bitsPerSample != 32) && (wav.encoding != 1 || wav.bitsPerSample != 16)) {
+        error = "WAV must be float32 or PCM16"; return false;
+    }
     if (wav.channels == 0 || wav.sampleRate == 0) {
         error = "WAV file is invalid";
         return false;
@@ -95,8 +103,18 @@ inline bool readWav(const std::filesystem::path& path, WavData& wav, std::string
     }
     std::uint32_t dataBytes = 0;
     if (!readWavHeader(in, wav, dataBytes, error)) return false;
-    const auto frames = dataBytes / sizeof(float) / wav.channels;
+    const auto sampleBytes = wav.bitsPerSample / 8;
+    if (dataBytes % (sampleBytes * wav.channels)) { error = "invalid WAV data size"; return false; }
+    const auto frames = dataBytes / sampleBytes / wav.channels;
     wav.interleaved.resize(static_cast<std::size_t>(frames) * wav.channels);
+    if (wav.encoding == 1) {
+        for (auto& value : wav.interleaved) {
+            unsigned char bytes[2]; in.read(reinterpret_cast<char*>(bytes), 2);
+            if (!in) { error = "WAV file is truncated"; return false; }
+            value = static_cast<float>(static_cast<std::int16_t>(bytes[0] | (static_cast<std::uint16_t>(bytes[1]) << 8))) / 32768.f;
+        }
+        return true;
+    }
     in.read(reinterpret_cast<char*>(wav.interleaved.data()), static_cast<std::streamsize>(wav.interleaved.size() * sizeof(float)));
     if (!in || static_cast<std::size_t>(in.gcount()) != wav.interleaved.size() * sizeof(float)) {
         error = "WAV file is truncated";
@@ -119,6 +137,7 @@ inline bool readWavRange(
     }
     std::uint32_t dataBytes = 0;
     if (!readWavHeader(in, wav, dataBytes, error)) return false;
+    if (wav.encoding != 3) { error = "cached WAV range requires float32"; return false; }
     const auto totalFrames = static_cast<std::uint64_t>(dataBytes / sizeof(float) / wav.channels);
     if (startFrame > totalFrames) {
         error = "WAV range starts past the end";

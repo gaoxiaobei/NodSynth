@@ -37,6 +37,9 @@ struct SongRenderOptions {
     bool useCache{true};
     std::string quality{"final"};
     bool freezeExternal{false};
+    std::string format{"float32"};
+    std::string pcmOverflow{"reject"};
+    std::filesystem::path previewOutput;
 };
 
 struct StemReport {
@@ -46,6 +49,8 @@ struct StemReport {
     float peak{0.f};
     std::string adapter{"nodsynth"};
     std::uint32_t latencySamples{0};
+    bool cacheHit{false};
+    double dspMs{0};
 };
 
 struct TimingBreakdown {
@@ -84,6 +89,12 @@ struct SongRenderReport {
     std::string renderId;
     std::string auditionStatus{"unheard"};
     std::string mixPath;
+    std::string format{"float32"};
+    std::string fileHash;
+    std::string previewPath;
+    std::string previewHash;
+    double exportGain{1};
+    double previewGain{1};
     std::optional<std::uint32_t> previewStartTick;
     std::optional<std::uint32_t> previewEndTick;
     std::vector<StemReport> stems;

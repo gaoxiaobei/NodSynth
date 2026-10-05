@@ -11,10 +11,14 @@ NodSynth 是一个开发中的节点式复音软件合成器。用户在画布�
 - [产品目标与架构](docs/PROJECT.md)：产品边界、核心原则和当前实现。
 - [开发路线与近期计划](docs/ROADMAP.md)：里程碑、交付物和验收条件。
 - [编曲工作台迭代](docs/ITERATION-COMPOSING.md)：依据 Agent 实际编曲体验，改善原生创作、编辑反馈、音色和试听效率。
+- [编曲命令指南](docs/COMPOSING-COMMANDS.md)：资源收集、乐句、参数自动化和试听记录。
+- [D0–D2 交付验收](docs/history/COMPOSING-2026-10-05.md)：公开命令复测、性能与人工试听状态。
+- [Agent 编曲体感建议](docs/AGENT-COMPOSING-FEEDBACK.md)：trance 复测后的开发优先级（资源路径、diff、乐句原语、预设与试听）。
 - [后 MVP 设计](docs/COMPOSITION-SUITE.md)：歌曲工程、命令行/AI 接口、多合成器渲染及插件路线。
 
 ## 当前能力
 
+- 歌曲格式 v3：自包含预设资源、完整实体 diff、乐句展开与和弦辅助、采样精确 cutoff/level 自动化、trance/house 预设，以及独立 PCM16 试听和确认记录。
 - 图模型、端口校验、确定性调度、撤销/重做，以及版本化 JSON 工程。
 - 16 声部运行时：振荡器、ADSR、低通、增益、控制运算、反馈延迟、Voice Mix 和立体声输出。
 - 离线渲染命令 `nod_render`：演示音符、soak，以及 `--midi` / `--patch` 的 SMF 渲染、尾音和 JSON 报告。Windows 独立应用 `nodsynth_app` 提供 WASAPI 输出、MIDI 输入、节点画布和屏幕键盘。

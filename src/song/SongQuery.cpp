@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <sstream>
+#include <nodsynth/song/Automation.h>
+#include <nodsynth/render/OfflineRenderer.h>
 
 namespace nodsynth::song {
 namespace {
@@ -27,7 +29,9 @@ std::string fnv(const std::string& text) {
 
 std::uint32_t ticksPerBar(const TimeSignaturePoint& signature, std::uint16_t ppq) {
     const auto den = signature.denominator == 0 ? 4 : signature.denominator;
-    return static_cast<std::uint32_t>(signature.numerator) * (static_cast<std::uint32_t>(ppq) * 4u / den);
+    const auto numerator = static_cast<std::uint64_t>(signature.numerator) * ppq * 4u;
+    if (numerator % den || numerator / den > UINT32_MAX) return 0;
+    return static_cast<std::uint32_t>(numerator / den);
 }
 
 TimeSignaturePoint signatureAt(const SongDocument& song, std::uint32_t tick) {
@@ -114,6 +118,7 @@ const Track* findTrack(const SongDocument& song, const std::string& id) {
 std::vector<std::string> registeredCommands() {
     return {
         "set-instrument",
+        "set-parameter",
         "set-gain",
         "set-pan",
         "set-gain-automation",
@@ -136,6 +141,11 @@ std::vector<std::string> registeredCommands() {
         "set-time-signature",
         "set-song-range",
         "bind-preset",
+        "collect-resources",
+        "add-pattern",
+        "transpose-notes",
+        "scale-velocities",
+        "add-pump",
     };
 }
 
@@ -172,6 +182,33 @@ persist::Json capabilitiesJson(const SongDocument& song) {
     pan.set("automatable", persist::Json::boolean(false));
     parameters.push(std::move(pan));
     capabilities.set("parameters", std::move(parameters));
+    auto instrumentParameters = persist::Json::array();
+    for (const auto& track : song.tracks) {
+        for (const auto& instrument : song.instruments) {
+            if (instrument.id != track.instrumentId || instrument.kind != InstrumentKind::nodsynth) continue;
+            for (const auto& resource : song.resources) {
+                if (resource.id != instrument.resourceId) continue;
+                std::string error;
+                auto graph = render::loadPatch(resolveResourcePath(song.baseDirectory, resource.path), error);
+                auto item = persist::Json::object(); item.set("track", jsonString(track.id));
+                item.set("backend", jsonString("nodsynth"));
+                if (graph) item.set("parameters", parametersJson(*graph));
+                else item.set("error", jsonString(error));
+                instrumentParameters.push(std::move(item));
+            }
+        }
+    }
+    capabilities.set("instrumentParameters", std::move(instrumentParameters));
+    auto backends = persist::Json::array();
+    for (const auto* backend : {"nodsynth", "vst3", "external-cli"}) {
+        auto item = persist::Json::object(); item.set("backend", jsonString(backend));
+        item.set("automatable", persist::Json::boolean(std::string(backend) != "external-cli"));
+        item.set("address", jsonString(std::string(backend) == "vst3" ? "vst3:decimalParamId (legacy unambiguous titles accepted)" : "nodeId/parameterId or macro:id"));
+        item.set("valueDomain", jsonString(std::string(backend) == "vst3" ? "normalized 0..1" : "physical (macros normalized)"));
+        backends.push(std::move(item));
+    }
+    capabilities.set("backendParameters", std::move(backends));
+    capabilities.set("interpolation", jsonString("NodSynth: step/linear, base before first point, hold after last, no additional offline smoothing; VST3: normalized linear"));
     return capabilities;
 }
 
@@ -199,6 +236,15 @@ persist::Json trackSummary(const Track& track, int order) {
     }
     item.set("clipList", std::move(clips));
     item.set("gainAutomation", automationSummary(track.gainAutomation));
+    auto parameters = persist::Json::array();
+    for (const auto& lane : track.parameterAutomation) {
+        auto item = persist::Json::object(); item.set("id", jsonString(lane.id));
+        item.set("valueDomain", jsonString(lane.valueDomain)); item.set("interpolation", jsonString(lane.interpolation));
+        item.set("points", jsonNumber(static_cast<double>(lane.points.size())));
+        if (!lane.points.empty()) { item.set("startTick", jsonNumber(lane.points.front().tick)); item.set("endTick", jsonNumber(lane.points.back().tick)); }
+        parameters.push(std::move(item));
+    }
+    item.set("parameterAutomation", std::move(parameters));
     return item;
 }
 
@@ -340,8 +386,13 @@ bool barsToTicks(
         if (bar == startBar) startTick = tick;
         const auto span = ticksPerBar(signatureAt(song, tick), song.ppq);
         if (span == 0 || tick > 0xffffffffu - span) {
-            error = "bar range does not fit in the song";
+            error = "bar range cannot be represented exactly at this PPQ or exceeds the tick range";
             return false;
+        }
+        for (const auto& point : song.timeSignatures) {
+            if (point.tick > tick && point.tick < tick + span) {
+                error = "time-signature changes must occur on a bar boundary"; return false;
+            }
         }
         tick += span;
     }
@@ -349,209 +400,6 @@ bool barsToTicks(
     return true;
 }
 
-persist::Json semanticDiff(const SongDocument& before, const SongDocument& after, bool expandAutomation) {
-    persist::Json diff = persist::Json::object();
-    persist::Json changes = persist::Json::array();
-    persist::Json added = persist::Json::array();
-    persist::Json removed = persist::Json::array();
-    persist::Json tracksTouched = persist::Json::array();
-    std::vector<std::string> trackIds;
-    const auto touch = [&](const std::string& id) {
-        if (std::find(trackIds.begin(), trackIds.end(), id) == trackIds.end()) {
-            trackIds.push_back(id);
-            tracksTouched.push(jsonString(id));
-        }
-    };
-
-    if (before.ppq != after.ppq) {
-        changes.push(changeJson("song", "", "ppq", jsonNumber(before.ppq), jsonNumber(after.ppq)));
-    }
-    const auto beforeRange = before.songRangeEndTick ? jsonNumber(*before.songRangeEndTick) : persist::Json::null();
-    const auto afterRange = after.songRangeEndTick ? jsonNumber(*after.songRangeEndTick) : persist::Json::null();
-    if (before.songRangeEndTick != after.songRangeEndTick) {
-        persist::Json item = persist::Json::object();
-        item.set("entityType", jsonString("song"));
-        item.set("id", jsonString(""));
-        item.set("field", jsonString("songRangeEndTick"));
-        item.set("before", beforeRange);
-        item.set("after", afterRange);
-        changes.push(std::move(item));
-    }
-    if (before.tempo.size() != after.tempo.size() ||
-        (!before.tempo.empty() && !after.tempo.empty() &&
-         (before.tempo.front().microsecondsPerQuarter != after.tempo.front().microsecondsPerQuarter))) {
-        const auto bpm = [](const SongDocument& song) {
-            return song.tempo.empty() ? 0.0 : 60000000.0 / static_cast<double>(song.tempo.front().microsecondsPerQuarter);
-        };
-        changes.push(changeJson("song", "", "tempo", jsonNumber(bpm(before)), jsonNumber(bpm(after))));
-    }
-    if (before.timeSignatures.size() != after.timeSignatures.size() ||
-        (!before.timeSignatures.empty() && !after.timeSignatures.empty() &&
-         (before.timeSignatures.front().numerator != after.timeSignatures.front().numerator ||
-          before.timeSignatures.front().denominator != after.timeSignatures.front().denominator))) {
-        changes.push(changeJson(
-            "song", "", "timeSignature",
-            jsonString(std::to_string(before.timeSignatures.empty() ? 4 : before.timeSignatures.front().numerator) + "/" +
-                       std::to_string(before.timeSignatures.empty() ? 4 : before.timeSignatures.front().denominator)),
-            jsonString(std::to_string(after.timeSignatures.empty() ? 4 : after.timeSignatures.front().numerator) + "/" +
-                       std::to_string(after.timeSignatures.empty() ? 4 : after.timeSignatures.front().denominator))));
-    }
-
-    for (const auto& track : after.tracks) {
-        const auto* previous = findTrack(before, track.id);
-        if (previous == nullptr) {
-            persist::Json data = persist::Json::object();
-            data.set("name", jsonString(track.name));
-            data.set("order", jsonNumber(track.order));
-            added.push(entityJson("track", track.id, std::move(data)));
-            touch(track.id);
-            continue;
-        }
-        if (previous->name != track.name) {
-            changes.push(changeJson("track", track.id, "name", jsonString(previous->name), jsonString(track.name)));
-            touch(track.id);
-        }
-        if (previous->order != track.order) {
-            changes.push(changeJson("track", track.id, "order", jsonNumber(previous->order), jsonNumber(track.order)));
-            touch(track.id);
-        }
-        if (previous->gain != track.gain) {
-            changes.push(changeJson("track", track.id, "gain", jsonNumber(previous->gain), jsonNumber(track.gain)));
-            touch(track.id);
-        }
-        if (previous->pan != track.pan) {
-            changes.push(changeJson("track", track.id, "pan", jsonNumber(previous->pan), jsonNumber(track.pan)));
-            touch(track.id);
-        }
-        if (previous->instrumentId != track.instrumentId) {
-            changes.push(changeJson("track", track.id, "instrument", jsonString(previous->instrumentId), jsonString(track.instrumentId)));
-            touch(track.id);
-        }
-        const auto beforeAuto = expandAutomation ? automationFull(previous->gainAutomation) : automationSummary(previous->gainAutomation);
-        const auto afterAuto = expandAutomation ? automationFull(track.gainAutomation) : automationSummary(track.gainAutomation);
-        if (beforeAuto.dump(-1) != afterAuto.dump(-1)) {
-            persist::Json item = persist::Json::object();
-            item.set("entityType", jsonString("track"));
-            item.set("id", jsonString(track.id));
-            item.set("field", jsonString("gainAutomation"));
-            item.set("before", beforeAuto);
-            item.set("after", afterAuto);
-            changes.push(std::move(item));
-            touch(track.id);
-        }
-        if (previous->parameterAutomation.size() != track.parameterAutomation.size()) {
-            changes.push(changeJson(
-                "track", track.id, "parameterAutomation", jsonNumber(static_cast<double>(previous->parameterAutomation.size())),
-                jsonNumber(static_cast<double>(track.parameterAutomation.size()))));
-            touch(track.id);
-        }
-
-        for (const auto& clip : track.clips) {
-            const Clip* previousClip = nullptr;
-            for (const auto& candidate : previous->clips) {
-                if (candidate.id == clip.id) previousClip = &candidate;
-            }
-            if (previousClip == nullptr) {
-                persist::Json data = persist::Json::object();
-                data.set("track", jsonString(track.id));
-                data.set("startTick", jsonNumber(clip.startTick));
-                data.set("length", jsonNumber(clip.length));
-                added.push(entityJson("clip", clip.id, std::move(data)));
-                touch(track.id);
-            } else if (previousClip->startTick != clip.startTick || previousClip->length != clip.length) {
-                if (previousClip->startTick != clip.startTick) {
-                    changes.push(changeJson("clip", clip.id, "startTick", jsonNumber(previousClip->startTick), jsonNumber(clip.startTick)));
-                }
-                if (previousClip->length != clip.length) {
-                    changes.push(changeJson("clip", clip.id, "length", jsonNumber(previousClip->length), jsonNumber(clip.length)));
-                }
-                touch(track.id);
-            }
-            for (const auto& note : clip.notes) {
-                const Note* previousNote = nullptr;
-                if (previousClip != nullptr) {
-                    for (const auto& candidate : previousClip->notes) {
-                        if (candidate.id == note.id) previousNote = &candidate;
-                    }
-                }
-                if (previousNote == nullptr) {
-                    added.push(entityJson("note", note.id, noteData(note, track.id, clip.id, clip.startTick)));
-                    touch(track.id);
-                } else if (
-                    previousNote->tick != note.tick || previousNote->duration != note.duration || previousNote->pitch != note.pitch ||
-                    previousNote->velocity != note.velocity) {
-                    persist::Json item = persist::Json::object();
-                    item.set("entityType", jsonString("note"));
-                    item.set("id", jsonString(note.id));
-                    item.set("track", jsonString(track.id));
-                    persist::Json fields = persist::Json::object();
-                    if (previousNote->tick != note.tick) {
-                        fields.set("tick", changeJson("note", note.id, "tick", jsonNumber(previousNote->tick), jsonNumber(note.tick)));
-                    }
-                    if (previousNote->pitch != note.pitch) {
-                        changes.push(changeJson("note", note.id, "pitch", jsonNumber(previousNote->pitch), jsonNumber(note.pitch)));
-                    }
-                    if (previousNote->tick != note.tick) {
-                        changes.push(changeJson("note", note.id, "tick", jsonNumber(previousNote->tick), jsonNumber(note.tick)));
-                    }
-                    if (previousNote->duration != note.duration) {
-                        changes.push(changeJson("note", note.id, "duration", jsonNumber(previousNote->duration), jsonNumber(note.duration)));
-                    }
-                    if (previousNote->velocity != note.velocity) {
-                        changes.push(changeJson("note", note.id, "velocity", jsonNumber(previousNote->velocity), jsonNumber(note.velocity)));
-                    }
-                    touch(track.id);
-                    (void)item;
-                    (void)fields;
-                }
-            }
-            if (previousClip != nullptr) {
-                for (const auto& note : previousClip->notes) {
-                    bool found = false;
-                    for (const auto& candidate : clip.notes) {
-                        if (candidate.id == note.id) found = true;
-                    }
-                    if (!found) {
-                        removed.push(entityJson("note", note.id, noteData(note, track.id, clip.id, previousClip->startTick)));
-                        touch(track.id);
-                    }
-                }
-            }
-        }
-        for (const auto& clip : previous->clips) {
-            bool found = false;
-            for (const auto& candidate : track.clips) {
-                if (candidate.id == clip.id) found = true;
-            }
-            if (!found) {
-                persist::Json data = persist::Json::object();
-                data.set("track", jsonString(track.id));
-                removed.push(entityJson("clip", clip.id, std::move(data)));
-                touch(track.id);
-            }
-        }
-    }
-    for (const auto& track : before.tracks) {
-        if (findTrack(after, track.id) == nullptr) {
-            persist::Json data = persist::Json::object();
-            data.set("name", jsonString(track.name));
-            removed.push(entityJson("track", track.id, std::move(data)));
-            touch(track.id);
-        }
-    }
-
-    const auto changedEntityCount = changes.asArray().size() + added.asArray().size() + removed.asArray().size();
-    persist::Json range = persist::Json::object();
-    range.set("startTick", jsonNumber(0));
-    range.set("endTick", jsonNumber(std::max(endTick(before), endTick(after))));
-    diff.set("changes", std::move(changes));
-    diff.set("added", std::move(added));
-    diff.set("removed", std::move(removed));
-    diff.set("changedEntityCount", jsonNumber(static_cast<double>(changedEntityCount)));
-    diff.set("tracks", std::move(tracksTouched));
-    diff.set("invalidateRange", std::move(range));
-    return diff;
-}
 
 persist::Json querySong(const SongDocument& song, std::optional<std::uint32_t> startTick, std::optional<std::uint32_t> endTick) {
     QueryOptions options;
@@ -595,6 +443,20 @@ persist::Json querySong(const SongDocument& song, const QueryOptions& options) {
                 persist::Json item = persist::Json::object();
                 item.set("track", jsonString(track->id));
                 item.set("gainAutomation", options.expandAutomation ? automationFull(track->gainAutomation) : automationSummary(track->gainAutomation));
+                auto parameters = persist::Json::array();
+                for (const auto& lane : track->parameterAutomation) {
+                    auto record = persist::Json::object(); record.set("id", jsonString(lane.id));
+                    record.set("valueDomain", jsonString(lane.valueDomain)); record.set("interpolation", jsonString(lane.interpolation));
+                    auto points = persist::Json::array();
+                    for (const auto& point : lane.points) {
+                        auto value = persist::Json::object(); value.set("tick", jsonNumber(point.tick)); value.set("value", jsonNumber(point.value)); points.push(std::move(value));
+                    }
+                    record.set("pointCount", jsonNumber(static_cast<double>(lane.points.size())));
+                    record.set("hash", jsonString(fnv(points.dump(-1))));
+                    if (options.expandAutomation) record.set("points", std::move(points));
+                    parameters.push(std::move(record));
+                }
+                item.set("parameterAutomation", std::move(parameters));
                 lanes.push(std::move(item));
             }
             json.set("automation", std::move(lanes));

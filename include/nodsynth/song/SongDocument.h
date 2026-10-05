@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -10,7 +11,7 @@
 #include <nodsynth/persist/Json.h>
 
 namespace nodsynth::song {
-inline constexpr int kSongFormatVersion = 2;
+inline constexpr int kSongFormatVersion = 3;
 inline constexpr int kMinSupportedSongFormatVersion = 1;
 
 struct Diagnostic {
@@ -37,6 +38,8 @@ struct Resource {
     std::string path;
     std::string hash;
     std::string kind{"patch"};
+    std::string presetId;
+    int presetVersion{0};
 };
 
 enum class InstrumentKind { nodsynth, externalCli, vst3 };
@@ -87,6 +90,8 @@ struct ParameterPoint {
 struct ParameterLane {
     std::string id;
     std::vector<ParameterPoint> points;
+    std::string valueDomain{"normalized"};
+    std::string interpolation{"linear"};
 };
 
 struct Track {
@@ -101,6 +106,7 @@ struct Track {
     std::vector<Clip> clips;
     std::vector<GainPoint> gainAutomation;
     std::vector<ParameterLane> parameterAutomation;
+    std::map<std::string, double> parameterValues;
     std::vector<PerformanceEvent> performance;
 };
 
@@ -119,6 +125,8 @@ struct PreservedEvent {
 };
 
 struct SongDocument {
+    // Runtime context, never persisted in the portable document.
+    std::filesystem::path baseDirectory;
     int version{kSongFormatVersion};
     std::uint64_t revision{1};
     std::uint16_t ppq{480};
@@ -131,6 +139,7 @@ struct SongDocument {
     std::vector<PreservedEvent> preserved;
     std::vector<Diagnostic> diagnostics;
     std::vector<std::string> appliedRequests;
+    std::map<std::string, std::string> requestContents;
     std::vector<std::string> undoStack;
     std::vector<std::string> redoStack;
     std::string sourceMidiHash;
@@ -198,7 +207,9 @@ struct ImportResult {
 [[nodiscard]] bool saveSong(const std::filesystem::path& path, const SongDocument& song, std::string& error);
 [[nodiscard]] Validation validate(const SongDocument& song);
 [[nodiscard]] Validation validateDocument(const SongDocument& song);
-[[nodiscard]] Validation validateRenderReady(const SongDocument& song);
+[[nodiscard]] Validation validateRenderReady(const SongDocument& song, const std::filesystem::path& baseDirectory = {});
+[[nodiscard]] std::filesystem::path resolveResourcePath(const std::filesystem::path& base, const std::string& stored);
+[[nodiscard]] persist::Json resourceDiagnostics(const SongDocument& song, const std::filesystem::path& base);
 [[nodiscard]] persist::Json summaryJson(const SongDocument& song, const Validation& validation);
 [[nodiscard]] SongDocument createSong(const CreateSongOptions& options);
 [[nodiscard]] persist::Json querySong(
@@ -211,7 +222,7 @@ struct ImportResult {
     bool dryRun = false);
 [[nodiscard]] ApplyResult undoSong(SongDocument& song);
 [[nodiscard]] ApplyResult redoSong(SongDocument& song);
-[[nodiscard]] persist::Json semanticDiff(const SongDocument& before, const SongDocument& after, bool expandAutomation = false);
+[[nodiscard]] persist::Json semanticDiff(const SongDocument& before, const SongDocument& after, bool expandAutomation = false, bool expandNotes = true);
 [[nodiscard]] bool bindPatch(
     SongDocument& song,
     const std::string& trackId,

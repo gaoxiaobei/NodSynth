@@ -165,6 +165,7 @@ std::vector<Vst3Parameter> Vst3Plugin::parameters() const
             if (character < 128) parameter.title.push_back(static_cast<char>(character));
         }
         parameter.canAutomate = (info.flags & Steinberg::Vst::ParameterInfo::kCanAutomate) != 0;
+        parameter.value = instance_->controller->getParamNormalized(info.id);
         result.push_back(std::move(parameter));
     }
     return result;

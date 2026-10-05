@@ -1,5 +1,7 @@
 #include <nodsynth/song/SongDocument.h>
 #include <nodsynth/song/Presets.h>
+#include <nodsynth/song/Phrases.h>
+#include <nodsynth/song/Automation.h>
 
 #include <algorithm>
 #include <cmath>
@@ -179,6 +181,9 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         return false;
     }
     const auto name = op->asString();
+    if (name == "add-pattern" || name == "transpose-notes" || name == "scale-velocities" || name == "add-pump")
+        return applyPhrase(song, command, idMap, error);
+    if (name == "collect-resources") return true;
     if (name == "set-instrument") {
         const auto* trackId = command.find("track");
         const auto* patch = command.find("patch");
@@ -186,7 +191,19 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
             error = "set-instrument requires track and patch";
             return false;
         }
-        std::filesystem::path file = patch->asString();
+        auto file = resolveResourcePath(song.baseDirectory, patch->asString());
+        if (const auto* base = command.find("pathBase")) {
+            if (base->asString() != "cwd" && base->asString() != "song-directory") {
+                error = "pathBase must be cwd or song-directory";
+                return false;
+            }
+            if (base->asString() == "cwd") file = resolveResourcePath(std::filesystem::current_path(), patch->asString());
+        }
+        if (hashFile(file).empty()) { error = "patch is missing or unreadable"; return false; }
+        if (command.find("pathBase") && command.find("pathBase")->asString() == "cwd") {
+            const auto absolute = std::filesystem::absolute(file).u8string();
+            return bindPatch(song, trackId->asString(), {reinterpret_cast<const char*>(absolute.data()), absolute.size()}, file, error);
+        }
         return bindPatch(song, trackId->asString(), patch->asString(), file, error);
     }
     if (name == "set-gain" || name == "set-pan") {
@@ -241,6 +258,17 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         track->gainAutomation = std::move(automation);
         return true;
     }
+    if (name == "set-parameter") {
+        const auto* trackId = command.find("track");
+        const auto* parameter = command.find("parameter");
+        auto* track = trackId ? findTrack(song, trackId->asString()) : nullptr;
+        double value = 0;
+        if (!track || !parameter || parameter->asString().empty() || !finiteNumber(command.find("value"), value)) {
+            error = "set-parameter requires track, parameter and a finite value"; return false;
+        }
+        track->parameterValues[parameter->asString()] = value;
+        return true;
+    }
     if (name == "set-parameter-automation") {
         const auto* trackId = command.find("track");
         const auto* parameter = command.find("parameter");
@@ -253,10 +281,17 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         }
         ParameterLane lane;
         lane.id = parameter->asString();
+        if (const auto* domain = command.find("valueDomain")) lane.valueDomain = domain->asString();
+        if (const auto* interpolation = command.find("interpolation")) lane.interpolation = interpolation->asString();
+        if ((lane.valueDomain != "normalized" && lane.valueDomain != "physical") ||
+            (lane.interpolation != "step" && lane.interpolation != "linear")) {
+            error = "valueDomain must be physical/normalized and interpolation step/linear"; return false;
+        }
         for (const auto& point : points->asArray()) {
             ParameterPoint value;
             double normalized = 0;
-            if (!readU32(point.find("tick"), value.tick) || !finiteNumber(point.find("value"), normalized) || normalized < 0.0 || normalized > 1.0) {
+            if (!readU32(point.find("tick"), value.tick) || !finiteNumber(point.find("value"), normalized) ||
+                (lane.valueDomain == "normalized" && (normalized < 0.0 || normalized > 1.0))) {
                 error = "a parameter point is invalid";
                 return false;
             }
@@ -511,7 +546,12 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         } else {
             copy.startTick = clip->startTick + clip->length;
         }
-        for (auto& note : copy.notes) note.id = freshId(song, "note");
+        if (const auto* bar = command.find("startBar")) {
+            std::uint32_t startBar = 0, unused = 0;
+            if (!readU32(bar, startBar) || !barsToTicks(song, startBar, startBar + 1, copy.startTick, unused, error)) return false;
+        }
+        std::size_t noteIndex = 0;
+        for (auto& note : copy.notes) note.id = copy.id + ":note:" + std::to_string(++noteIndex);
         track->clips.push_back(copy);
         idMap.set(copy.id, persist::Json::string(copy.id));
         return true;
@@ -707,6 +747,7 @@ std::string hashFile(const std::filesystem::path& path) {
             hash *= 1099511628211ull;
         }
     }
+    if (input.bad()) return {};
     return hex64(hash);
 }
 
@@ -742,6 +783,10 @@ persist::Json toJson(const SongDocument& song) {
         item.set("path", persist::Json::string(resource.path));
         item.set("hash", persist::Json::string(resource.hash));
         item.set("kind", persist::Json::string(resource.kind));
+        if (!resource.presetId.empty()) {
+            item.set("presetId", persist::Json::string(resource.presetId));
+            item.set("presetVersion", persist::Json::number(resource.presetVersion));
+        }
         resources.push(std::move(item));
     }
     json.set("resources", std::move(resources));
@@ -796,10 +841,15 @@ persist::Json toJson(const SongDocument& song) {
             automation.push(std::move(pointJson));
         }
         item.set("gainAutomation", std::move(automation));
+        auto baseParameters = persist::Json::object();
+        for (const auto& [id, value] : track.parameterValues) baseParameters.set(id, persist::Json::number(value));
+        item.set("parameterValues", std::move(baseParameters));
         persist::Json parameters = persist::Json::array();
         for (const auto& lane : track.parameterAutomation) {
             persist::Json laneJson = persist::Json::object();
             laneJson.set("id", persist::Json::string(lane.id));
+            laneJson.set("valueDomain", persist::Json::string(lane.valueDomain));
+            laneJson.set("interpolation", persist::Json::string(lane.interpolation));
             persist::Json points = persist::Json::array();
             for (const auto& point : lane.points) {
                 persist::Json pointJson = persist::Json::object();
@@ -851,6 +901,9 @@ persist::Json toJson(const SongDocument& song) {
     persist::Json requests = persist::Json::array();
     for (const auto& request : song.appliedRequests) requests.push(persist::Json::string(request));
     json.set("appliedRequests", std::move(requests));
+    auto requestContents = persist::Json::object();
+    for (const auto& [id, contents] : song.requestContents) requestContents.set(id, persist::Json::string(contents));
+    json.set("requestContents", std::move(requestContents));
     persist::Json undo = persist::Json::array();
     for (const auto& image : song.undoStack) undo.push(persist::Json::string(image));
     json.set("undo", std::move(undo));
@@ -951,6 +1004,8 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
             resource.id = id->asString();
             resource.path = path->asString();
             if (const auto* hash = item.find("hash")) resource.hash = hash->asString();
+            if (const auto* preset = item.find("presetId")) resource.presetId = preset->asString();
+            if (const auto* version = item.find("presetVersion")) resource.presetVersion = static_cast<int>(version->asNumber());
             if (const auto* kind = item.find("kind"); kind != nullptr && !kind->asString().empty()) resource.kind = kind->asString();
             song.resources.push_back(std::move(resource));
             return true;
@@ -1087,6 +1142,14 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                     track.gainAutomation.push_back(point);
                 }
             }
+            if (const auto* values = item.find("parameterValues")) {
+                if (values->kind() != persist::Json::Kind::object) { error = "parameterValues must be an object"; return false; }
+                for (const auto& [id, value] : values->items()) {
+                    double number = 0;
+                    if (!finiteNumber(&value, number)) { error = "parameter value must be finite"; return false; }
+                    track.parameterValues[id] = number;
+                }
+            }
             if (const auto* parameters = item.find("parameterAutomation"); parameters != nullptr) {
                 if (parameters->kind() != persist::Json::Kind::array) {
                     error = "parameter automation must be an array";
@@ -1101,11 +1164,13 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                     }
                     ParameterLane lane;
                     lane.id = laneId->asString();
+                    if (const auto* domain = laneJson.find("valueDomain")) lane.valueDomain = domain->asString();
+                    if (const auto* interpolation = laneJson.find("interpolation")) lane.interpolation = interpolation->asString();
                     for (const auto& pointJson : points->asArray()) {
                         ParameterPoint point;
                         double value = 0;
-                        if (!readU32(pointJson.find("tick"), point.tick) || !finiteNumber(pointJson.find("value"), value) || value < 0.0 ||
-                            value > 1.0) {
+                        if (!readU32(pointJson.find("tick"), point.tick) || !finiteNumber(pointJson.find("value"), value) ||
+                            (lane.valueDomain == "normalized" && (value < 0.0 || value > 1.0))) {
                             error = "a parameter point is invalid";
                             return false;
                         }
@@ -1198,6 +1263,8 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
         })) {
         return std::nullopt;
     }
+    if (const auto* contents = json.find("requestContents"))
+        for (const auto& [id, value] : contents->items()) song.requestContents[id] = value.asString();
     if (!readObjects("appliedRequests", [&](const persist::Json& item) {
             if (item.kind() != persist::Json::Kind::string) {
                 error = "applied request ids must be strings";
@@ -1234,13 +1301,53 @@ std::optional<SongDocument> loadSong(const std::filesystem::path& path, std::str
     if (!readText(path, text, error)) return std::nullopt;
     auto json = persist::Json::parse(text, error);
     if (!json) return std::nullopt;
-    return songFromJson(*json, error);
+    auto song = songFromJson(*json, error);
+    if (song) song->baseDirectory = std::filesystem::absolute(path).parent_path();
+    return song;
 }
 
 bool saveSong(const std::filesystem::path& path, const SongDocument& song, std::string& error) {
     if (path.empty()) {
         error = "missing song path";
         return false;
+    }
+    SongDocument saved = song;
+    const auto destination = std::filesystem::absolute(path).parent_path();
+    if (!song.baseDirectory.empty() && destination.lexically_normal() != song.baseDirectory.lexically_normal()) {
+        const auto rebase = [&](SongDocument& document) {
+            for (auto& resource : document.resources) {
+                const auto source = resolveResourcePath(song.baseDirectory, resource.path);
+                const bool collected = !resource.hash.empty() &&
+                    (resource.path == "assets/presets/" + resource.hash + ".json" ||
+                     resource.path == "assets/audio/" + resource.hash + ".sf2" || resource.path == "assets/audio/" + resource.hash + ".wav");
+                if (collected) {
+                    const auto target = resolveResourcePath(destination, resource.path);
+                    if (hashFile(target) != resource.hash) {
+                        if (hashFile(source) != resource.hash) { error = "cannot relocate a missing or changed collected asset"; return false; }
+                        std::error_code ec;
+                        std::filesystem::create_directories(target.parent_path(), ec);
+                        auto temporaryAsset = target; temporaryAsset += ".save-tmp";
+                        if (!ec) std::filesystem::copy_file(source, temporaryAsset, std::filesystem::copy_options::overwrite_existing, ec);
+                        if (ec || hashFile(temporaryAsset) != resource.hash || !replaceFile(temporaryAsset, target, error)) {
+                            std::filesystem::remove(temporaryAsset, ec);
+                            if (error.empty()) error = "failed to relocate collected asset"; return false;
+                        }
+                    }
+                } else {
+                    const auto absolute = std::filesystem::absolute(source).u8string();
+                    resource.path = {reinterpret_cast<const char*>(absolute.data()), absolute.size()};
+                }
+            }
+            return true;
+        };
+        if (!rebase(saved)) return false;
+        for (auto* stack : {&saved.undoStack, &saved.redoStack}) for (auto& image : *stack) {
+            auto json = persist::Json::parse(image, error);
+            if (!json) return false;
+            auto document = songFromJson(*json, error);
+            if (!document || !rebase(*document)) return false;
+            image = toJson(*document).dump(-1);
+        }
     }
     std::filesystem::path temporary = path;
     temporary += ".nodsynth-tmp";
@@ -1250,7 +1357,7 @@ bool saveSong(const std::filesystem::path& path, const SongDocument& song, std::
             error = "failed to write the temporary song file";
             return false;
         }
-        const auto text = toJson(song).dump();
+        const auto text = toJson(saved).dump();
         output.write(text.data(), static_cast<std::streamsize>(text.size()));
         output.flush();
         if (!output) {
@@ -1274,7 +1381,7 @@ Validation validateDocument(const SongDocument& song) {
     Validation result;
     if (song.version != kSongFormatVersion) result.diagnostics.push_back({"version", "song version is not supported"});
     if (song.ppq == 0) result.diagnostics.push_back({"ppq", "ppq must be positive"});
-    if (song.tempo.empty() || song.tempo.front().tick != 0) {
+    if (song.tempo.empty() || song.tempo.front().tick != 0 || song.tempo.front().microsecondsPerQuarter == 0) {
         result.diagnostics.push_back({"tempo", "tempo map must start at tick 0"});
     }
     for (std::size_t index = 1; index < song.tempo.size(); ++index) {
@@ -1295,7 +1402,7 @@ Validation validateDocument(const SongDocument& song) {
     }
     for (const auto& track : song.tracks) {
         addUnique(ids, track.id, "track", result);
-        if (track.pan < -1.0 || track.pan > 1.0 || !std::isfinite(track.gain) || track.gain < 0.0) {
+        if (track.pan < -1.0 || track.pan > 1.0 || !std::isfinite(track.pan) || !std::isfinite(track.gain) || track.gain < 0.0) {
             result.diagnostics.push_back({"mix", "track gain or pan is invalid", 0, -1, track.id});
         }
         if (!track.instrumentId.empty() &&
@@ -1317,12 +1424,25 @@ Validation validateDocument(const SongDocument& song) {
             addUnique(ids, clip.id, "clip", result);
             for (const auto& note : clip.notes) {
                 addUnique(ids, note.id, "note", result);
-                if (note.channel > 15) result.diagnostics.push_back({"note", "note channel is invalid", note.tick, -1, note.id});
+                if (note.channel > 15 || note.pitch > 127 || note.velocity > 127 ||
+                    (clip.length && static_cast<std::uint64_t>(note.tick) + note.duration > clip.length))
+                    result.diagnostics.push_back({"note", "note pitch, velocity, channel or clip bounds are invalid", note.tick, -1, note.id});
                 const auto start = static_cast<std::uint64_t>(clip.startTick) + note.tick;
                 if (start + note.duration > 0xffffffffu) {
                     result.diagnostics.push_back({"note", "note extends past the tick range", note.tick, -1, note.id});
                 }
             }
+        }
+        std::vector<std::string> parameterIds;
+        for (const auto& lane : track.parameterAutomation) {
+            if (lane.id.empty() || std::find(parameterIds.begin(), parameterIds.end(), lane.id) != parameterIds.end() ||
+                (lane.valueDomain != "physical" && lane.valueDomain != "normalized") || (lane.interpolation != "linear" && lane.interpolation != "step"))
+                result.diagnostics.push_back({"automation", "parameter lane id, unit or interpolation is invalid", 0, -1, track.id});
+            parameterIds.push_back(lane.id);
+            for (std::size_t i = 0; i < lane.points.size(); ++i)
+                if (!std::isfinite(lane.points[i].value) || (i && lane.points[i].tick <= lane.points[i - 1].tick) ||
+                    (lane.valueDomain == "normalized" && (lane.points[i].value < 0 || lane.points[i].value > 1)))
+                    result.diagnostics.push_back({"automation", "parameter lane points are invalid", lane.points[i].tick, -1, track.id});
         }
         for (const auto& event : track.performance) addUnique(ids, event.id, "performance", result);
     }
@@ -1330,7 +1450,7 @@ Validation validateDocument(const SongDocument& song) {
     return result;
 }
 
-Validation validateRenderReady(const SongDocument& song) {
+Validation validateRenderReady(const SongDocument& song, const std::filesystem::path& baseDirectory) {
     auto result = validateDocument(song);
     for (const auto& track : song.tracks) {
         bool hasMusic = !track.performance.empty();
@@ -1341,7 +1461,28 @@ Validation validateRenderReady(const SongDocument& song) {
             result.diagnostics.push_back({"missing-patch", "a track with music has no instrument", 0, -1, track.id});
             result.ok = false;
         }
+        if (!track.parameterAutomation.empty() || !track.parameterValues.empty()) {
+            const auto instrument = std::find_if(song.instruments.begin(), song.instruments.end(), [&](const auto& item) { return item.id == track.instrumentId; });
+            std::string error;
+            if (instrument == song.instruments.end()) error = "automation requires an instrument";
+            else if (instrument->kind == InstrumentKind::externalCli) error = "external CLI backend does not support parameter automation";
+            else if (instrument->kind == InstrumentKind::vst3) {
+                if (!track.parameterValues.empty()) error = "VST3 base parameter overrides are not supported";
+                for (const auto& lane : track.parameterAutomation)
+                    if (lane.valueDomain != "normalized" || lane.interpolation != "linear") error = "VST3 requires normalized linear lanes";
+            } else {
+                const auto resource = std::find_if(song.resources.begin(), song.resources.end(), [&](const auto& item) { return item.id == instrument->resourceId; });
+                if (resource == song.resources.end()) error = "automation requires a patch resource";
+                else {
+                    const auto graph = render::loadPatch(resolveResourcePath(baseDirectory.empty() ? song.baseDirectory : baseDirectory, resource->path), error);
+                    std::vector<PreparedLane> checked;
+                    if (graph) (void)prepareAutomation(song, track, *graph, nullptr, 48000, checked, error);
+                }
+            }
+            if (!error.empty()) result.diagnostics.push_back({"unsupported-automation", error, 0, -1, track.id});
+        }
     }
+    result.ok = result.diagnostics.empty();
     return result;
 }
 
@@ -1448,7 +1589,11 @@ ApplyResult undoSong(SongDocument& song) {
     }
     restored->undoStack = std::move(undo);
     restored->redoStack = std::move(redo);
-    result.diff = semanticDiff(song, *restored, false);
+    restored->baseDirectory = song.baseDirectory;
+    restored->revision = song.revision + 1;
+    restored->appliedRequests = song.appliedRequests;
+    restored->requestContents = song.requestContents;
+    result.diff = semanticDiff(song, *restored, false, false);
     song = std::move(*restored);
     result.ok = true;
     result.baseRevision = result.revision;
@@ -1479,7 +1624,11 @@ ApplyResult redoSong(SongDocument& song) {
     }
     restored->undoStack = std::move(undo);
     restored->redoStack = std::move(redo);
-    result.diff = semanticDiff(song, *restored, false);
+    restored->baseDirectory = song.baseDirectory;
+    restored->revision = song.revision + 1;
+    restored->appliedRequests = song.appliedRequests;
+    restored->requestContents = song.requestContents;
+    result.diff = semanticDiff(song, *restored, false, false);
     song = std::move(*restored);
     result.ok = true;
     result.baseRevision = result.revision;
@@ -1504,17 +1653,18 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         requestId = request->asString();
     }
     result.requestId = requestId;
+    const auto* requestCommands = batch.find("commands");
+    const auto requestContent = requestCommands ? requestCommands->dump(-1) : std::string{};
+    if (!requestId.empty() && song.requestContents.contains(requestId) && song.requestContents.at(requestId) != requestContent) {
+        result.code = "request-conflict"; result.message = "requestId was already used with different commands"; return result;
+    }
     if (!requestId.empty() &&
         std::find(song.appliedRequests.begin(), song.appliedRequests.end(), requestId) != song.appliedRequests.end()) {
         result.ok = true;
         result.unchanged = true;
         result.noop = true;
         result.message = "request already applied";
-        result.diff = persist::Json::object();
-        result.diff.set("changes", persist::Json::array());
-        result.diff.set("added", persist::Json::array());
-        result.diff.set("removed", persist::Json::array());
-        result.diff.set("changedEntityCount", persist::Json::number(0));
+        result.diff = semanticDiff(song, song, false, false);
         return result;
     }
     if (expectRevision && *expectRevision != song.revision) {
@@ -1540,13 +1690,52 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
             return result;
         }
     }
+    struct Copy { std::filesystem::path source, target; std::string hash; };
+    std::vector<Copy> copies;
+    bool collectAll = false;
+    bool includeAssets = false;
+    std::vector<std::string> boundTracks;
+    for (const auto& command : commands->asArray()) {
+        const auto* op = command.find("op");
+        if (!op) continue;
+        if (op->asString() == "collect-resources") {
+            collectAll = true;
+            includeAssets = command.find("includeAssets") && command.find("includeAssets")->asBool();
+        }
+        if ((op->asString() == "bind-preset" || op->asString() == "set-instrument") && command.find("track") &&
+            !(command.find("externalReference") && command.find("externalReference")->asBool()))
+            boundTracks.push_back(command.find("track")->asString());
+    }
+    for (auto& resource : next.resources) {
+        bool collect = collectAll && (resource.kind == "patch" || (includeAssets && (resource.kind == "soundfont" || resource.kind == "sample")));
+        for (const auto& track : next.tracks) {
+            if (std::find(boundTracks.begin(), boundTracks.end(), track.id) == boundTracks.end()) continue;
+            for (const auto& instrument : next.instruments)
+                if (instrument.id == track.instrumentId && instrument.resourceId == resource.id) collect = true;
+        }
+        if (!collect) continue;
+        const auto source = resolveResourcePath(next.baseDirectory, resource.path);
+        const auto actual = hashFile(source);
+        if (actual.empty() || (!resource.hash.empty() && resource.hash != actual)) {
+            result.code = "resource-io"; result.message = "cannot collect a missing, unreadable, or changed resource: " + resource.id;
+            return result;
+        }
+        // Content addresses contain only trusted hashes, never caller-provided filenames.
+        const auto stored = resource.kind == "patch" ? std::string("assets/presets/") + actual + ".json"
+            : std::string("assets/audio/") + actual + (resource.kind == "soundfont" ? ".sf2" : ".wav");
+        const auto target = resolveResourcePath(next.baseDirectory, stored);
+        copies.push_back({source, target, actual});
+        resource.path = stored;
+        resource.hash = actual;
+    }
     const auto validation = validateDocument(next);
-    if (!validation.ok && validateDocument(song).ok) {
+    if (!validation.ok) {
         result.code = "invalid-song";
         result.message = validation.diagnostics.empty() ? "song failed validation" : validation.diagnostics.front().message;
         return result;
     }
-    result.diff = semanticDiff(song, next, false);
+    const auto detail = batch.find("diffDetail") ? batch.find("diffDetail")->asString() : std::string("summary");
+    result.diff = semanticDiff(song, next, detail == "full", detail == "notes" || detail == "full");
     result.idMap = std::move(idMap);
     const auto* count = result.diff.find("changedEntityCount");
     const bool semanticChange = count != nullptr && count->asNumber() > 0;
@@ -1557,10 +1746,11 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         result.message = "no semantic change";
         if (!requestId.empty() && !dryRun) {
             song.appliedRequests.push_back(requestId);
+            song.requestContents[requestId] = requestContent;
         }
         return result;
     }
-    if (!requestId.empty()) next.appliedRequests.push_back(requestId);
+    if (!requestId.empty()) { next.appliedRequests.push_back(requestId); next.requestContents[requestId] = requestContent; }
     ++next.revision;
     next.undoStack.push_back(image);
     next.redoStack.clear();
@@ -1568,6 +1758,30 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
     result.ok = true;
     result.revision = next.revision;
     result.message = dryRun ? "previewed" : "applied";
+    if (!dryRun) {
+        std::vector<std::filesystem::path> created;
+        for (const auto& copy : copies) {
+            std::error_code ec;
+            if (std::filesystem::exists(copy.target, ec)) {
+                if (hashFile(copy.target) == copy.hash) continue;
+                result.ok = false; result.code = "resource-io"; result.message = "content-addressed asset has different content";
+            } else {
+                std::filesystem::create_directories(copy.target.parent_path(), ec);
+                auto temporary = copy.target;
+                temporary += ".collect-tmp";
+                if (!ec) std::filesystem::copy_file(copy.source, temporary, std::filesystem::copy_options::overwrite_existing, ec);
+                std::string failure;
+                if (ec || hashFile(temporary) != copy.hash || !replaceFile(temporary, copy.target, failure)) {
+                    std::filesystem::remove(temporary, ec);
+                    result.ok = false; result.code = "resource-io"; result.message = "failed to collect resource atomically";
+                } else created.push_back(copy.target);
+            }
+            if (!result.ok) {
+                for (const auto& path : created) std::filesystem::remove(path, ec);
+                return result;
+            }
+        }
+    }
     if (!dryRun) song = std::move(next);
     else result.revision = song.revision;
     return result;

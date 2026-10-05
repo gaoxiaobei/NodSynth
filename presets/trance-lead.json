@@ -1,0 +1,354 @@
+{
+  "format": "nodsynth.project",
+  "formatVersion": 1,
+  "viewport": {
+    "originX": 0,
+    "originY": 0,
+    "zoom": 1
+  },
+  "nodes": [
+    {
+      "id": "midi",
+      "typeId": "nod.midi-input",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 40,
+        "y": 120
+      }
+    },
+    {
+      "id": "note-to-frequency",
+      "typeId": "nod.note-to-frequency",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 280,
+        "y": 40
+      }
+    },
+    {
+      "id": "oscillator",
+      "typeId": "nod.oscillator",
+      "schemaVersion": 1,
+      "parameters": {
+        "waveform": 2,
+        "level": 0.22
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 540,
+        "y": 40
+      }
+    },
+    {
+      "id": "envelope",
+      "typeId": "nod.adsr",
+      "schemaVersion": 1,
+      "parameters": {
+        "attack": 0.007,
+        "decay": 0.2,
+        "sustain": 0.7,
+        "release": 0.24
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 540,
+        "y": 220
+      }
+    },
+    {
+      "id": "filter",
+      "typeId": "nod.lowpass",
+      "schemaVersion": 1,
+      "parameters": {
+        "cutoff": 4200,
+        "resonance": 0.12
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 820,
+        "y": 40
+      }
+    },
+    {
+      "id": "gain",
+      "typeId": "nod.gain",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 1080,
+        "y": 120
+      }
+    },
+    {
+      "id": "voice-mix",
+      "typeId": "nod.voice-mix",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 1320,
+        "y": 120
+      }
+    },
+    {
+      "id": "audio-output",
+      "typeId": "nod.audio-output",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 1560,
+        "y": 120
+      }
+    },
+    {
+      "id": "detune-low",
+      "typeId": "nod.scale-bias",
+      "schemaVersion": 1,
+      "parameters": {
+        "scale": 0.9971,
+        "bias": 0
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    },
+    {
+      "id": "detune-high",
+      "typeId": "nod.scale-bias",
+      "schemaVersion": 1,
+      "parameters": {
+        "scale": 1.0029,
+        "bias": 0
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    },
+    {
+      "id": "saw-low",
+      "typeId": "nod.oscillator",
+      "schemaVersion": 1,
+      "parameters": {
+        "waveform": 2,
+        "level": 0.22
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    },
+    {
+      "id": "saw-high",
+      "typeId": "nod.oscillator",
+      "schemaVersion": 1,
+      "parameters": {
+        "waveform": 2,
+        "level": 0.22
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    },
+    {
+      "id": "saw-mix",
+      "typeId": "nod.mix",
+      "schemaVersion": 1,
+      "parameters": {
+        "mix": 0.5
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    },
+    {
+      "id": "layer-mix",
+      "typeId": "nod.mix",
+      "schemaVersion": 1,
+      "parameters": {
+        "mix": 0.333333
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 700,
+        "y": 400
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "node": "midi",
+        "port": "note"
+      },
+      "to": {
+        "node": "note-to-frequency",
+        "port": "note"
+      }
+    },
+    {
+      "from": {
+        "node": "note-to-frequency",
+        "port": "frequency"
+      },
+      "to": {
+        "node": "oscillator",
+        "port": "frequency"
+      }
+    },
+    {
+      "from": {
+        "node": "midi",
+        "port": "gate"
+      },
+      "to": {
+        "node": "envelope",
+        "port": "gate"
+      }
+    },
+    {
+      "from": {
+        "node": "filter",
+        "port": "audio-out"
+      },
+      "to": {
+        "node": "gain",
+        "port": "audio-in"
+      }
+    },
+    {
+      "from": {
+        "node": "envelope",
+        "port": "envelope"
+      },
+      "to": {
+        "node": "gain",
+        "port": "gain"
+      }
+    },
+    {
+      "from": {
+        "node": "gain",
+        "port": "audio-out"
+      },
+      "to": {
+        "node": "voice-mix",
+        "port": "voices"
+      }
+    },
+    {
+      "from": {
+        "node": "voice-mix",
+        "port": "audio"
+      },
+      "to": {
+        "node": "audio-output",
+        "port": "audio"
+      }
+    },
+    {
+      "from": {
+        "node": "note-to-frequency",
+        "port": "frequency"
+      },
+      "to": {
+        "node": "detune-low",
+        "port": "input"
+      }
+    },
+    {
+      "from": {
+        "node": "note-to-frequency",
+        "port": "frequency"
+      },
+      "to": {
+        "node": "detune-high",
+        "port": "input"
+      }
+    },
+    {
+      "from": {
+        "node": "detune-low",
+        "port": "output"
+      },
+      "to": {
+        "node": "saw-low",
+        "port": "frequency"
+      }
+    },
+    {
+      "from": {
+        "node": "detune-high",
+        "port": "output"
+      },
+      "to": {
+        "node": "saw-high",
+        "port": "frequency"
+      }
+    },
+    {
+      "from": {
+        "node": "oscillator",
+        "port": "audio"
+      },
+      "to": {
+        "node": "saw-mix",
+        "port": "a"
+      }
+    },
+    {
+      "from": {
+        "node": "saw-low",
+        "port": "audio"
+      },
+      "to": {
+        "node": "saw-mix",
+        "port": "b"
+      }
+    },
+    {
+      "from": {
+        "node": "saw-mix",
+        "port": "audio"
+      },
+      "to": {
+        "node": "layer-mix",
+        "port": "a"
+      }
+    },
+    {
+      "from": {
+        "node": "saw-high",
+        "port": "audio"
+      },
+      "to": {
+        "node": "layer-mix",
+        "port": "b"
+      }
+    },
+    {
+      "from": {
+        "node": "layer-mix",
+        "port": "audio"
+      },
+      "to": {
+        "node": "filter",
+        "port": "audio-in"
+      }
+    }
+  ]
+}

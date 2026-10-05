@@ -152,13 +152,15 @@ void Engine::retire(RuntimePlan* plan) noexcept {
     reclaimExtra_.compare_exchange_strong(expected, plan, std::memory_order_release, std::memory_order_relaxed);
 }
 
-void Engine::renderPlan(RuntimePlan& plan, float* left, float* right, std::uint32_t frames) {
+void Engine::renderPlan(RuntimePlan& plan, float* left, float* right, std::uint32_t frames,
+                        std::span<const ParameterEvent> parameters, std::uint32_t origin) {
     std::fill_n(left, frames, 0.f);
     std::fill_n(right, frames, 0.f);
-    plan.process(voices_, left, right, frames);
+    plan.process(voices_, left, right, frames, parameters, origin);
 }
 
-void Engine::process(float* const* outputs, std::uint32_t channels, std::uint32_t frames, std::span<const MidiEvent> midi) {
+void Engine::process(float* const* outputs, std::uint32_t channels, std::uint32_t frames, std::span<const MidiEvent> midi,
+                     std::span<const ParameterEvent> parameters) {
     entries_.fetch_add(1, std::memory_order_acq_rel);
     if (halt_.load(std::memory_order_acquire)) {
         exits_.fetch_add(1, std::memory_order_acq_rel);
@@ -215,7 +217,7 @@ void Engine::process(float* const* outputs, std::uint32_t channels, std::uint32_
             std::fill_n(left, chunk, 0.f);
             std::fill_n(right, chunk, 0.f);
         } else {
-            renderPlan(*active_, left, right, chunk);
+            renderPlan(*active_, left, right, chunk, parameters, rendered);
         }
         if (outgoing_ != nullptr && fadeLeft_ > 0) {
             renderPlan(*outgoing_, oldLeft, oldRight, chunk);

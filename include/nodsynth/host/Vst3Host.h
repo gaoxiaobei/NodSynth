@@ -26,6 +26,7 @@ struct Vst3Parameter {
     std::uint32_t id{0};
     std::string title;
     bool canAutomate{false};
+    double value{0};
 };
 
 struct Vst3ParamPoint {

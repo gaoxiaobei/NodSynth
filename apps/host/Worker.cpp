@@ -5,8 +5,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <charconv>
+#include <cmath>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,7 +50,8 @@ int main(int argc, char** argv)
         std::uint32_t id{0};
         double value{0};
     };
-    std::vector<ResolvedPoint> automation;
+    std::map<std::uint32_t, std::vector<ResolvedPoint>> automation;
+    std::map<std::uint32_t, double> baseValues;
     if (argc >= 9 && std::string(argv[8]) != "-") {
         std::ifstream input(std::filesystem::path(argv[8]), std::ios::binary);
         if (!input) return fail("failed to open parameter automation");
@@ -60,19 +65,35 @@ int main(int argc, char** argv)
         for (const auto& point : points->asArray()) {
             const auto* name = point.find("parameter");
             if (name == nullptr || name->kind() != nodsynth::persist::Json::Kind::string) return fail("a parameter point has no name");
-            const auto found = std::find_if(listed.begin(), listed.end(), [&](const nodsynth::host::Vst3Parameter& parameter) {
-                return parameter.title == name->asString();
-            });
-            if (found == listed.end()) return fail("the plugin has no parameter named " + name->asString());
+            std::optional<std::uint32_t> stableId;
+            const auto& address = name->asString();
+            if (address.starts_with("vst3:")) {
+                std::uint32_t id = 0;
+                const auto parsedId = std::from_chars(address.data() + 5, address.data() + address.size(), id);
+                if (parsedId.ec != std::errc{} || parsedId.ptr != address.data() + address.size()) return fail("invalid VST3 stable parameter ID");
+                stableId = id;
+            }
+            const auto matches = [&](const auto& parameter) { return stableId ? parameter.id == *stableId : parameter.title == address; };
+            if (std::count_if(listed.begin(), listed.end(), matches) != 1) return fail("parameter address is absent or ambiguous: " + address);
+            const auto found = std::find_if(listed.begin(), listed.end(), matches);
+            if (!found->canAutomate) return fail("parameter cannot be automated: " + address);
             ResolvedPoint resolved;
-            resolved.sample = static_cast<std::uint32_t>(std::max(0.0, point.find("sample") == nullptr ? 0.0 : point.find("sample")->asNumber()));
+            const auto* time = point.find("sample"); const auto* value = point.find("value");
+            if (!time || !value || time->kind() != nodsynth::persist::Json::Kind::number || value->kind() != nodsynth::persist::Json::Kind::number ||
+                !std::isfinite(time->asNumber()) || time->asNumber() < 0 || time->asNumber() > UINT32_MAX || std::floor(time->asNumber()) != time->asNumber() ||
+                !std::isfinite(value->asNumber()) || value->asNumber() < 0 || value->asNumber() > 1) return fail("invalid normalized parameter point");
+            resolved.sample = static_cast<std::uint32_t>(time->asNumber());
             resolved.id = found->id;
-            resolved.value = point.find("value") == nullptr ? 0.0 : point.find("value")->asNumber();
-            automation.push_back(resolved);
+            resolved.value = value->asNumber();
+            automation[resolved.id].push_back(resolved);
+            baseValues[resolved.id] = found->value;
         }
-        std::stable_sort(automation.begin(), automation.end(), [](const ResolvedPoint& left, const ResolvedPoint& right) {
-            return left.sample < right.sample;
-        });
+        if (automation.size() > 64) return fail("at most 64 parameter lanes are supported");
+        for (auto& [id, lane] : automation) {
+            std::stable_sort(lane.begin(), lane.end(), [](const auto& a, const auto& b) { return a.sample < b.sample; });
+            for (std::size_t i = 1; i < lane.size(); ++i)
+                if (lane[i].sample <= lane[i - 1].sample) return fail("parameter samples must be strictly increasing");
+        }
     }
 
     std::int64_t last = 0;
@@ -100,7 +121,8 @@ int main(int argc, char** argv)
     std::vector<float> left(block, 0.f);
     std::vector<float> right(block, 0.f);
     std::size_t cursor = 0;
-    std::size_t paramCursor = 0;
+    std::vector<nodsynth::host::Vst3ParamPoint> blockParameters;
+    blockParameters.reserve(static_cast<std::size_t>(block) * automation.size());
     for (std::uint64_t rendered = 0; rendered < total; rendered += block) {
         std::vector<nodsynth::host::Vst3Midi> blockEvents;
         const auto blockEnd = rendered + block;
@@ -110,16 +132,20 @@ int main(int argc, char** argv)
             blockEvents.push_back(midi);
             ++cursor;
         }
-        std::vector<nodsynth::host::Vst3ParamPoint> blockParameters;
-        while (paramCursor < automation.size() && automation[paramCursor].sample < rendered + block) {
-            if (automation[paramCursor].sample >= rendered) {
-                nodsynth::host::Vst3ParamPoint point;
-                point.sampleOffset = static_cast<std::uint32_t>(automation[paramCursor].sample - rendered);
-                point.id = automation[paramCursor].id;
-                point.value = automation[paramCursor].value;
-                blockParameters.push_back(point);
+        blockParameters.clear();
+        for (std::uint32_t frame = 0; frame < block; ++frame) {
+            const auto sample = rendered + frame;
+            for (const auto& [id, lane] : automation) {
+                double value = baseValues.at(id);
+                if (sample >= lane.front().sample) {
+                    const auto upper = std::upper_bound(lane.begin(), lane.end(), sample,
+                        [](auto time, const auto& point) { return time < point.sample; });
+                    const auto& lower = *(upper - 1); value = lower.value;
+                    if (upper != lane.end()) value += (upper->value - lower.value) * static_cast<double>(sample - lower.sample) /
+                        static_cast<double>(upper->sample - lower.sample);
+                }
+                blockParameters.push_back({frame, id, value});
             }
-            ++paramCursor;
         }
         if (!instrument.process(left.data(), right.data(), block, blockEvents, error, nullptr, nullptr, blockParameters.empty() ? nullptr : &blockParameters)) {
             return fail(error.empty() ? "plugin process failed" : error);

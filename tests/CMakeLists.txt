@@ -12,6 +12,7 @@ add_executable(nod_tests
   render/OfflineRendererTests.cpp
   runtime/RuntimeTests.cpp
   song/SongTests.cpp
+  song/IterationTests.cpp
   daw/TimelineTests.cpp
 )
 target_link_libraries(nod_tests PRIVATE nod_model nod_nodes nod_persist nod_midi nod_render_core nod_song nod_daw_core nod_graphcheck_scenarios Catch2::Catch2WithMain)

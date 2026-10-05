@@ -13,6 +13,8 @@
 #include <nodsynth/runtime/Engine.h>
 #include <nodsynth/runtime/WavFile.h>
 #include <nodsynth/song/Process.h>
+#include <nodsynth/song/Automation.h>
+#include <nodsynth/song/AudioExport.h>
 
 namespace nodsynth::song {
 namespace {
@@ -22,12 +24,6 @@ SongRenderReport fail(std::string code, std::string message, std::vector<Diagnos
     report.message = std::move(message);
     report.diagnostics = std::move(diagnostics);
     return report;
-}
-
-std::filesystem::path resolvePath(const std::filesystem::path& base, const std::string& stored) {
-    const std::filesystem::path path(stored);
-    if (path.is_absolute() || base.empty()) return path;
-    return base / path;
 }
 
 bool safeTrackId(const std::string& id) {
@@ -200,6 +196,10 @@ struct TrackVoice {
         double value{0};
     };
     std::vector<ParameterSample> parameters;
+    std::vector<PreparedLane> nodParameters;
+    std::vector<runtime::ParameterEvent> parameterBlock;
+    bool cachedDry{false};
+    double dspMs{0};
     std::vector<TimedEvent> events;
     std::size_t cursor{0};
     std::size_t externalCursor{0};
@@ -300,6 +300,8 @@ std::string trackSoundKey(const SongDocument& song, const Track& track, const So
     for (const auto& lane : track.parameterAutomation) {
         persist::Json laneJson = persist::Json::object();
         laneJson.set("id", persist::Json::string(lane.id));
+        laneJson.set("valueDomain", persist::Json::string(lane.valueDomain));
+        laneJson.set("interpolation", persist::Json::string(lane.interpolation));
         persist::Json points = persist::Json::array();
         for (const auto& point : lane.points) {
             persist::Json pointJson = persist::Json::object();
@@ -311,9 +313,14 @@ std::string trackSoundKey(const SongDocument& song, const Track& track, const So
         parameters.push(std::move(laneJson));
     }
     json.set("parameterAutomation", std::move(parameters));
+    auto bases = persist::Json::object();
+    for (const auto& [id, value] : track.parameterValues) bases.set(id, persist::Json::number(value));
+    json.set("parameterValues", std::move(bases));
+    json.set("automationEngineVersion", persist::Json::number(2));
     for (const auto& instrument : song.instruments) {
         if (instrument.id != track.instrumentId) continue;
         json.set("kind", persist::Json::string(instrument.kind == InstrumentKind::nodsynth ? "nodsynth" : instrument.adapter));
+        if (instrument.kind == InstrumentKind::vst3) json.set("vst3AutomationVersion", persist::Json::number(2));
         for (const auto& resource : song.resources) {
             if (resource.id != instrument.resourceId) continue;
             json.set("resourceHash", persist::Json::string(resource.hash));
@@ -400,6 +407,14 @@ persist::Json songReportJson(const SongRenderReport& report) {
     json.set("renderId", persist::Json::string(report.renderId));
     json.set("auditionStatus", persist::Json::string(report.auditionStatus));
     json.set("mixPath", persist::Json::string(report.mixPath));
+    json.set("format", persist::Json::string(report.format));
+    json.set("fileHash", persist::Json::string(report.fileHash));
+    json.set("previewPath", persist::Json::string(report.previewPath));
+    json.set("previewHash", persist::Json::string(report.previewHash));
+    json.set("exportGain", persist::Json::number(report.exportGain));
+    json.set("previewGain", persist::Json::number(report.previewGain));
+    json.set("dither", persist::Json::string("none"));
+    json.set("ditherSeed", persist::Json::null());
     if (report.previewStartTick) json.set("previewStartTick", persist::Json::number(*report.previewStartTick));
     if (report.previewEndTick) json.set("previewEndTick", persist::Json::number(*report.previewEndTick));
     json.set("latencySamples", persist::Json::number(0));
@@ -412,6 +427,8 @@ persist::Json songReportJson(const SongRenderReport& report) {
         item.set("peak", persist::Json::number(stem.peak));
         item.set("adapter", persist::Json::string(stem.adapter));
         item.set("latencySamples", persist::Json::number(stem.latencySamples));
+        item.set("cacheHit", persist::Json::boolean(stem.cacheHit));
+        item.set("dspMs", persist::Json::number(stem.dspMs));
         stems.push(std::move(item));
     }
     json.set("stems", std::move(stems));
@@ -449,6 +466,22 @@ SongRenderReport renderSong(
     auto externalStarted = started;
     bool externalRunning = false;
     auto finish = [&](SongRenderReport report) {
+        if (report.ok) {
+            report.format = options.format;
+            std::string error;
+            if (options.format == "pcm16" || !options.previewOutput.empty()) {
+                runtime::WavData audio;
+                if (!runtime::readWav(mixOutput, audio, error) ||
+                    (!options.previewOutput.empty() && !writePcm16(options.previewOutput, audio, options.pcmOverflow == "attenuate", report.previewGain, error)) ||
+                    (options.format == "pcm16" && !writePcm16(mixOutput, audio, options.pcmOverflow == "attenuate", report.exportGain, error))) {
+                    report.ok = false; report.code = "export-failed"; report.message = error;
+                }
+                if (!options.previewOutput.empty() && report.ok) {
+                    report.previewPath = utf8Path(options.previewOutput); report.previewHash = hashFile(options.previewOutput);
+                }
+            }
+            if (report.ok) report.fileHash = hashFile(mixOutput);
+        }
         report.milliseconds = msBetween(started, now());
         if (prepareMs == 0 && dspMs == 0 && externalMs == 0 && mixMs == 0 && writeMs == 0 && prerollMs == 0) {
             report.timing.prepareMs = report.milliseconds;
@@ -472,7 +505,7 @@ SongRenderReport renderSong(
         if (report.quality.empty()) report.quality = "final";
         if (report.auditionStatus.empty()) report.auditionStatus = "unheard";
         if (report.quality.empty()) report.quality = options.quality.empty() ? "final" : options.quality;
-        if (report.mixPath.empty()) report.mixPath = mixOutput.string();
+        if (report.mixPath.empty()) report.mixPath = utf8Path(mixOutput);
         report.previewStartTick = options.previewStartTick;
         report.previewEndTick = options.previewEndTick;
         if (report.renderId.empty()) {
@@ -487,10 +520,13 @@ SongRenderReport renderSong(
     };
     if (!runtime::validSampleRate(options.sampleRate) || options.sampleRate != std::floor(options.sampleRate) ||
         !runtime::validFrameCount(options.blockSize) || options.tailSeconds < 0.0 || options.maxTailSeconds < 0.0 ||
-        options.tailThreshold < 0.0 || options.maxEventsPerBlock == 0 || mixOutput.empty()) {
+        options.tailThreshold < 0.0 || options.maxEventsPerBlock == 0 || mixOutput.empty() ||
+        (options.format != "float32" && options.format != "pcm16") ||
+        (options.pcmOverflow != "reject" && options.pcmOverflow != "attenuate") ||
+        (!options.previewOutput.empty() && std::filesystem::absolute(options.previewOutput).lexically_normal() == std::filesystem::absolute(mixOutput).lexically_normal())) {
         return finish(fail("invalid-options", "sample rate, block size, tail, or output is invalid"));
     }
-    const auto validation = validate(song);
+    const auto validation = validateRenderReady(song, options.baseDirectory);
     if (!validation.ok) return finish(fail("invalid-song", "song failed validation", validation.diagnostics));
     if (options.mode == midi::RenderMode::strict) {
         std::vector<Diagnostic> unsupported;
@@ -503,6 +539,29 @@ SongRenderReport renderSong(
     }
 
     const auto rate = static_cast<std::uint32_t>(options.sampleRate);
+    const auto resourceChecks = resourceDiagnostics(song, options.baseDirectory.empty() ? song.baseDirectory : options.baseDirectory);
+    for (const auto& diagnostic : resourceChecks.asArray()) {
+        const auto code = diagnostic.find("code")->asString();
+        if (code != "non-portable") return finish(fail(code, diagnostic.dump(-1)));
+    }
+    // Validate addresses before any cache shortcut can accept stale or unsupported lanes.
+    for (const auto& track : song.tracks) {
+        if (track.parameterAutomation.empty() && track.parameterValues.empty()) continue;
+        const auto instrument = std::find_if(song.instruments.begin(), song.instruments.end(), [&](const auto& item) { return item.id == track.instrumentId; });
+        if (instrument == song.instruments.end()) return finish(fail("missing-instrument", "automation requires an instrument"));
+        if (instrument->kind != InstrumentKind::nodsynth) {
+            if (instrument->kind != InstrumentKind::vst3 || !track.parameterValues.empty()) return finish(fail("unsupported-automation", "backend cannot execute these parameters"));
+            for (const auto& lane : track.parameterAutomation)
+                if (lane.valueDomain != "normalized" || lane.interpolation != "linear") return finish(fail("unsupported-automation", "VST3 currently requires normalized linear lanes"));
+            continue;
+        }
+        const auto resource = std::find_if(song.resources.begin(), song.resources.end(), [&](const auto& item) { return item.id == instrument->resourceId; });
+        if (resource == song.resources.end()) return finish(fail("missing-resource", "automation patch was not found"));
+        std::string error;
+        auto graph = render::loadPatch(resolveResourcePath(options.baseDirectory.empty() ? song.baseDirectory : options.baseDirectory, resource->path), error);
+        std::vector<PreparedLane> checked;
+        if (!graph || !prepareAutomation(song, track, *graph, nullptr, rate, checked, error)) return finish(fail("unsupported-automation", error));
+    }
     const auto mixKey = fingerprint(song, options, true);
     const auto cacheDir = options.cacheDirectory.empty() ? mixOutput.parent_path() / ".nod-cache" : options.cacheDirectory;
     const auto cachedMix = cacheDir / mixKey / "mix.wav";
@@ -737,9 +796,10 @@ SongRenderReport renderSong(
                 for (std::size_t index = 0; index < remixTracks.size(); ++index) {
                     StemReport stemReport;
                     stemReport.trackId = remixTracks[index].item->track->id;
-                    if (writeStems) stemReport.path = stemPaths[index].string();
+                    if (writeStems) stemReport.path = utf8Path(stemPaths[index]);
                     stemReport.peak = stemPeaks[index];
                     stemReport.adapter = remixTracks[index].item->external ? "external-frozen" : "nodsynth";
+                    stemReport.cacheHit = true;
                     report.stems.push_back(std::move(stemReport));
                 }
                 return finish(std::move(report));
@@ -812,7 +872,7 @@ SongRenderReport renderSong(
             if (resource == song.resources.end() || resource->path.empty()) {
                 return finish(fail("missing-patch", "instrument patch was not found", {{"missing-patch", instrument->id, 0, -1, track.id}}));
             }
-            const auto patchPath = resolvePath(options.baseDirectory, resource->path);
+            const auto patchPath = resolveResourcePath(options.baseDirectory.empty() ? song.baseDirectory : options.baseDirectory, resource->path);
             if (!resource->hash.empty()) {
                 const auto actual = hashFile(patchPath);
                 if (actual.empty() || actual != resource->hash) {
@@ -824,6 +884,15 @@ SongRenderReport renderSong(
             if (voice.externalTrack) {
                 voice.asset = patchPath;
             } else {
+                if (options.useCache && !preview && options.tailMode == render::TailMode::fixed) {
+                    runtime::WavData dry;
+                    std::string cacheError;
+                    if (runtime::readWav(dryPath(cacheDir, voice.soundKey), dry, cacheError) && dry.channels == 2 && dry.sampleRate == rate && dry.encoding == 3) {
+                        voice.external = std::move(dry.interleaved);
+                        voice.cachedDry = true;
+                    }
+                }
+                if (!voice.cachedDry) {
                 std::string patchError;
                 auto graph = render::loadPatch(patchPath, patchError);
                 if (!graph) return finish(fail("missing-patch", patchError.empty() ? "failed to load the patch" : patchError));
@@ -833,6 +902,7 @@ SongRenderReport renderSong(
                 config.audio.voiceCount = 16;
                 const auto budgetSeconds = options.tailMode == render::TailMode::fixed ? options.tailSeconds : options.maxTailSeconds;
                 config.releaseHoldSeconds = std::max(0.5, budgetSeconds);
+                if (!track.parameterAutomation.empty() || !track.parameterValues.empty()) config.parameterSmoothSeconds = 0;
                 voice.engine = std::make_unique<runtime::Engine>(config);
                 const auto compiled = compiler::GraphCompiler{}.compile(*graph, registry);
                 if (!compiled.graph) {
@@ -842,8 +912,13 @@ SongRenderReport renderSong(
                 auto prepared = runtime::preparePlan(
                     *compiled.graph, registry, nodes::builtinImplementations(), voice.engine->config(), voice.engine->voices(),
                     voice.engine->parameterSmoothSeconds());
+                if (prepared.plan && !prepareAutomation(song, track, *graph, prepared.plan.get(), rate, voice.nodParameters, patchError))
+                    return finish(fail("unsupported-automation", patchError));
+                if (voice.nodParameters.size() > 64) return finish(fail("automation-capacity", "at most 64 automation targets per track"));
+                voice.parameterBlock.reserve(static_cast<std::size_t>(options.blockSize) * voice.nodParameters.size());
                 if (!prepared.plan || !voice.engine->stage(std::move(prepared.plan)).accepted) {
                     return finish(fail("prepare-failed", prepared.message.empty() ? "failed to prepare the patch" : prepared.message));
+                }
                 }
             }
         }
@@ -955,7 +1030,7 @@ SongRenderReport renderSong(
         }
         ProcessRequest request;
         request.timeoutMs = tool->timeoutMs;
-        if (!voice.parameters.empty() && voice.adapter != "vst3") {
+        if (!voice.parameters.empty() && voice.externalTrack && voice.adapter != "vst3") {
             return finish(fail("unsupported-automation", "parameter automation is available for VST3 instruments"));
         }
         const auto automationPath = work / (voice.trackId + ".automation.json");
@@ -989,7 +1064,8 @@ SongRenderReport renderSong(
         if (process.timedOut) return finish(fail("external-timeout", process.message));
         if (process.exitCode != 0) return finish(fail("external-failed", process.message.empty() ? "the external renderer failed" : process.message));
         if (voice.adapter == "vst3") {
-            std::ifstream latencyFile(wavPath.string() + ".latency");
+            auto latencyPath = wavPath; latencyPath += ".latency";
+            std::ifstream latencyFile(latencyPath);
             latencyFile >> voice.latencySamples;
         }
         DecodedWav decoded;
@@ -1021,7 +1097,7 @@ SongRenderReport renderSong(
             voice.stemPath = stemsDirectory / (voice.trackId + ".wav");
             if (!voice.stem->open(voice.stemPath, rate, 2, ioError)) return finish(fail("output-io", ioError));
         }
-        if (options.useCache && !preview && !voice.soundKey.empty() &&
+        if (options.useCache && !preview && !voice.cachedDry && !voice.soundKey.empty() &&
             (!voice.externalTrack || options.freezeExternal) && (options.quality.empty() || options.quality == "final")) {
             std::error_code failure;
             const auto path = dryPath(cacheDir, voice.soundKey);
@@ -1077,19 +1153,24 @@ SongRenderReport renderSong(
             const auto dspStarted = now();
             std::fill(left.begin(), left.begin() + chunk, 0.f);
             std::fill(right.begin(), right.begin() + chunk, 0.f);
-            if (voice.externalTrack) {
+            if (voice.externalTrack || voice.cachedDry) {
                 for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                     if (voice.externalCursor + 1 >= voice.external.size()) break;
                     left[frame] = voice.external[voice.externalCursor++];
                     right[frame] = voice.external[voice.externalCursor++];
                 }
             } else if (voice.engine) {
+                voice.parameterBlock.clear();
+                for (std::uint32_t frame = 0; frame < chunk; ++frame)
+                    for (const auto& lane : voice.nodParameters)
+                        voice.parameterBlock.push_back({frame, lane.index, static_cast<float>(parameterAt(lane, static_cast<std::int64_t>(rendered + frame)))});
                 float* outputs[] = {left.data(), right.data()};
-                voice.engine->process(outputs, 2, chunk, block);
+                voice.engine->process(outputs, 2, chunk, block, voice.parameterBlock);
                 voice.engine->reclaim();
             }
             const auto mixStarted = now();
             chunkDsp += msBetween(dspStarted, mixStarted);
+            if (!voice.cachedDry) voice.dspMs += msBetween(dspStarted, mixStarted);
             if (voice.dry) {
                 for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                     stem[static_cast<std::size_t>(frame) * 2] = left[frame];
@@ -1215,7 +1296,7 @@ SongRenderReport renderSong(
         for (const auto& voice : voices) {
             StemReport stem;
             stem.trackId = voice.trackId;
-            stem.path = voice.stemPath.string();
+            stem.path = utf8Path(voice.stemPath);
             stem.hash = hex64(voice.hash);
             stem.peak = voice.peak;
             stem.adapter = voice.adapter;
@@ -1315,11 +1396,13 @@ SongRenderReport renderSong(
     for (const auto& voice : voices) {
         StemReport stem;
         stem.trackId = voice.trackId;
-        stem.path = voice.stemPath.string();
+        stem.path = utf8Path(voice.stemPath);
         stem.hash = hex64(voice.hash);
         stem.peak = voice.peak;
         stem.adapter = voice.adapter;
         stem.latencySamples = voice.latencySamples;
+        stem.cacheHit = voice.cachedDry;
+        stem.dspMs = voice.dspMs;
         if (voice.adapter == "fluidsynth") {
             report.diagnostics.push_back(
                 {"non-deterministic", "FluidSynth output is not bit-exact across machines or versions", 0, -1, voice.trackId});
@@ -1340,6 +1423,9 @@ SongRenderReport renderSong(
         if (storedDry) {
             if (report.cacheReason == "stored-finished-mix") report.cacheReason = "stored-finished-mix-and-dry-tracks";
             else report.cacheReason = "stored-dry-tracks";
+        }
+        if (std::any_of(voices.begin(), voices.end(), [](const auto& voice) { return voice.cachedDry; })) {
+            report.cacheHit = true; report.cacheReason = "partial-dry-tracks";
         }
     }
     return finish(std::move(report));

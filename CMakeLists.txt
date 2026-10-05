@@ -79,9 +79,15 @@ add_library(nod_song
   src/song/SongRenderer.cpp
   src/song/ModelClient.cpp
   src/song/Presets.cpp
+  src/song/Resources.cpp
+  src/song/SongDiff.cpp
+  src/song/Automation.cpp
+  src/song/AudioExport.cpp
+  src/song/Phrases.cpp
 )
 target_include_directories(nod_song PUBLIC include)
 target_link_libraries(nod_song PUBLIC nod_render_core)
+target_compile_definitions(nod_song PRIVATE "NOD_BUILTIN_PRESETS=\"${CMAKE_SOURCE_DIR}/presets\"")
 target_compile_features(nod_song PUBLIC cxx_std_20)
 
 add_executable(nod apps/nod/Main.cpp)
