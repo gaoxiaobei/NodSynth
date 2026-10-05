@@ -46,9 +46,10 @@ double lufs(double meanSquare) {
     if (!(meanSquare > 0.0)) return -std::numeric_limits<double>::infinity();
     return -0.691 + 10.0 * std::log10(meanSquare);
 }
-} // namespace
 
-AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThreshold) {
+double dbToAmplitude(double thresholdDb) { return std::pow(10.0, thresholdDb / 20.0); }
+
+AudioAnalysis analyzeWav(const std::filesystem::path& path, const AnalyzeOptions& options, float silenceThreshold) {
     AudioAnalysis analysis;
     runtime::WavData wav;
     std::string error;
@@ -61,19 +62,52 @@ AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThresho
     analysis.channels = wav.channels;
     analysis.frames = wav.interleaved.size() / wav.channels;
     analysis.message = "analyzed";
+    analysis.windowSeconds = std::max(0.0, options.windowMs) * 0.001;
+    analysis.thresholdAmplitude = dbToAmplitude(options.thresholdDb);
     if (analysis.frames == 0) {
         analysis.leadingSilence = true;
         analysis.trailingSilence = true;
+        analysis.fullySilent = true;
+        analysis.samplePeakDb = -240.0;
         return analysis;
     }
     const float threshold = std::max(0.f, silenceThreshold);
+    const auto windowFrames = std::max<std::uint64_t>(
+        1, static_cast<std::uint64_t>(std::llround(std::max(0.0, options.windowMs) * 0.001 * wav.sampleRate)));
+    const double minSilenceSeconds = std::max(0.0, options.minSilenceMs) * 0.001;
     bool heard = false;
     std::uint64_t leading = 0;
     std::uint64_t trailing = 0;
+    double energy = 0.0;
+    double windowEnergy = 0.0;
+    std::uint64_t windowSamples = 0;
+    std::uint64_t windowStart = 0;
+    std::optional<std::uint64_t> firstActiveFrame;
+    std::optional<std::uint64_t> lastActiveEnd;
+    std::uint64_t activeFrames = 0;
+
+    auto closeWindow = [&](std::uint64_t endFrame) {
+        if (endFrame <= windowStart) return;
+        const auto samples = windowSamples == 0 ? 1 : windowSamples;
+        const double rms = std::sqrt(windowEnergy / static_cast<double>(samples));
+        if (rms > analysis.thresholdAmplitude) {
+            if (!firstActiveFrame) firstActiveFrame = windowStart;
+            lastActiveEnd = endFrame;
+            activeFrames += endFrame - windowStart;
+        }
+        windowEnergy = 0.0;
+        windowSamples = 0;
+        windowStart = endFrame;
+    };
+
     for (std::uint64_t frame = 0; frame < analysis.frames; ++frame) {
         float peak = 0.f;
         for (std::uint32_t channel = 0; channel < wav.channels; ++channel) {
-            peak = std::max(peak, std::fabs(wav.interleaved[static_cast<std::size_t>(frame) * wav.channels + channel]));
+            const float sample = wav.interleaved[static_cast<std::size_t>(frame) * wav.channels + channel];
+            peak = std::max(peak, std::fabs(sample));
+            energy += static_cast<double>(sample) * sample;
+            windowEnergy += static_cast<double>(sample) * sample;
+            ++windowSamples;
         }
         analysis.peak = std::max(analysis.peak, peak);
         if (peak <= threshold) {
@@ -84,9 +118,31 @@ AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThresho
             heard = true;
             trailing = 0;
         }
+        if ((frame - windowStart + 1) >= windowFrames) closeWindow(frame + 1);
     }
+    if (windowStart < analysis.frames) closeWindow(analysis.frames);
+
+    analysis.rms = std::sqrt(energy / static_cast<double>(wav.interleaved.size()));
+    if (analysis.peak > 0.f) analysis.samplePeakDb = 20.0 * std::log10(static_cast<double>(analysis.peak));
+    else analysis.samplePeakDb = -240.0;
     analysis.leadingSilence = leading == analysis.frames || leading > 0;
     analysis.trailingSilence = trailing > 0;
+    analysis.activeRatio = static_cast<double>(activeFrames) / static_cast<double>(analysis.frames);
+    analysis.fullySilent = !firstActiveFrame.has_value();
+    if (analysis.fullySilent) {
+        analysis.activityStartSeconds.reset();
+        analysis.activityEndSeconds.reset();
+        analysis.leadingSilenceSeconds = 0.0;
+        analysis.trailingSilenceSeconds = 0.0;
+    } else {
+        analysis.activityStartSeconds = static_cast<double>(*firstActiveFrame) / wav.sampleRate;
+        analysis.activityEndSeconds = static_cast<double>(*lastActiveEnd) / wav.sampleRate;
+        const double leadingSeconds = *analysis.activityStartSeconds;
+        const double trailingSeconds =
+            static_cast<double>(analysis.frames - *lastActiveEnd) / wav.sampleRate;
+        analysis.leadingSilenceSeconds = leadingSeconds >= minSilenceSeconds ? leadingSeconds : 0.0;
+        analysis.trailingSilenceSeconds = trailingSeconds >= minSilenceSeconds ? trailingSeconds : 0.0;
+    }
 
     if ((wav.sampleRate == 48000 || wav.sampleRate == 44100) && wav.channels >= 1) {
         std::vector<float> weighted(static_cast<std::size_t>(analysis.frames) * 2, 0.f);
@@ -103,13 +159,13 @@ AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThresho
         for (std::uint64_t start = 0; start < analysis.frames;) {
             const auto count = std::min(block, analysis.frames - start);
             if (analysis.frames >= block && count < block) break;
-            double energy = 0.0;
+            double blockEnergy = 0.0;
             for (std::uint64_t frame = 0; frame < count; ++frame) {
                 const float left = weighted[static_cast<std::size_t>(start + frame) * 2];
                 const float right = wav.channels > 1 ? weighted[static_cast<std::size_t>(start + frame) * 2 + 1] : left;
-                energy += static_cast<double>(left) * left + static_cast<double>(right) * right;
+                blockEnergy += static_cast<double>(left) * left + static_cast<double>(right) * right;
             }
-            powers.push_back(energy / static_cast<double>(count));
+            powers.push_back(blockEnergy / static_cast<double>(count));
             if (start + hop >= analysis.frames) break;
             start += hop;
             if (analysis.frames < block) break;
@@ -136,6 +192,15 @@ AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThresho
     }
     return analysis;
 }
+} // namespace
+
+AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThreshold) {
+    return analyzeWav(path, AnalyzeOptions{}, silenceThreshold);
+}
+
+AudioAnalysis analyzeWav(const std::filesystem::path& path, const AnalyzeOptions& options) {
+    return analyzeWav(path, options, 0.0001f);
+}
 
 persist::Json analysisJson(const AudioAnalysis& analysis) {
     persist::Json json = persist::Json::object();
@@ -148,6 +213,20 @@ persist::Json analysisJson(const AudioAnalysis& analysis) {
     json.set("silentFrames", persist::Json::number(static_cast<double>(analysis.silentFrames)));
     json.set("leadingSilence", persist::Json::boolean(analysis.leadingSilence));
     json.set("trailingSilence", persist::Json::boolean(analysis.trailingSilence));
+    json.set("leadingSilenceSeconds", persist::Json::number(analysis.leadingSilenceSeconds));
+    json.set("trailingSilenceSeconds", persist::Json::number(analysis.trailingSilenceSeconds));
+    json.set(
+        "activityStartSeconds",
+        analysis.activityStartSeconds ? persist::Json::number(*analysis.activityStartSeconds) : persist::Json::null());
+    json.set(
+        "activityEndSeconds",
+        analysis.activityEndSeconds ? persist::Json::number(*analysis.activityEndSeconds) : persist::Json::null());
+    json.set("activeRatio", persist::Json::number(analysis.activeRatio));
+    json.set("windowSeconds", persist::Json::number(analysis.windowSeconds));
+    json.set("thresholdAmplitude", persist::Json::number(analysis.thresholdAmplitude));
+    if (analysis.samplePeakDb) json.set("samplePeakDb", persist::Json::number(*analysis.samplePeakDb));
+    json.set("rms", persist::Json::number(analysis.rms));
+    json.set("fullySilent", persist::Json::boolean(analysis.fullySilent));
     if (analysis.loudnessLufs) json.set("loudnessLufs", persist::Json::number(*analysis.loudnessLufs));
     return json;
 }

@@ -32,6 +32,8 @@ struct SongRenderOptions {
     std::vector<ExternalTool> tools;
     std::optional<std::uint32_t> previewStartTick;
     std::optional<std::uint32_t> previewEndTick;
+    std::filesystem::path cacheDirectory;
+    bool useCache{true};
 };
 
 struct StemReport {
@@ -41,6 +43,20 @@ struct StemReport {
     float peak{0.f};
     std::string adapter{"nodsynth"};
     std::uint32_t latencySamples{0};
+};
+
+struct TimingBreakdown {
+    double prepareMs{0};
+    double prerollMs{0};
+    double dspMs{0};
+    double externalMs{0};
+    double mixMs{0};
+    double writeMs{0};
+    double analyzeMs{0};
+    double totalMs{0};
+    std::uint64_t renderedFrames{0};
+    std::uint64_t emittedFrames{0};
+    double realtimeFactor{0};
 };
 
 struct SongRenderReport {
@@ -58,6 +74,12 @@ struct SongRenderReport {
     std::string mixHash;
     std::string songHash;
     double milliseconds{0};
+    TimingBreakdown timing;
+    bool cacheHit{false};
+    std::string cacheReason{"cache-not-implemented"};
+    std::string quality{"final"};
+    std::string renderId;
+    std::string auditionStatus{"unheard"};
     std::vector<StemReport> stems;
     std::vector<Diagnostic> diagnostics;
 };

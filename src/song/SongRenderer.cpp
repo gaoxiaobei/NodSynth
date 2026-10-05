@@ -228,6 +228,71 @@ std::string hex64(std::uint64_t value) {
     }
     return text;
 }
+
+std::string fingerprint(const SongDocument& song, const SongRenderOptions& options, bool includeMix) {
+    persist::Json json = persist::Json::object();
+    json.set("ppq", persist::Json::number(song.ppq));
+    json.set("sampleRate", persist::Json::number(options.sampleRate));
+    json.set("blockSize", persist::Json::number(options.blockSize));
+    json.set("tailSeconds", persist::Json::number(options.tailSeconds));
+    json.set("endTick", persist::Json::number(endTick(song)));
+    persist::Json tempo = persist::Json::array();
+    for (const auto& point : song.tempo) {
+        persist::Json item = persist::Json::object();
+        item.set("tick", persist::Json::number(point.tick));
+        item.set("us", persist::Json::number(point.microsecondsPerQuarter));
+        tempo.push(std::move(item));
+    }
+    json.set("tempo", std::move(tempo));
+    persist::Json tracks = persist::Json::array();
+    for (const auto& track : song.tracks) {
+        persist::Json item = persist::Json::object();
+        item.set("id", persist::Json::string(track.id));
+        item.set("instrument", persist::Json::string(track.instrumentId));
+        if (includeMix) {
+            item.set("gain", persist::Json::number(track.gain));
+            item.set("pan", persist::Json::number(track.pan));
+            persist::Json automation = persist::Json::array();
+            for (const auto& point : track.gainAutomation) {
+                persist::Json gain = persist::Json::object();
+                gain.set("tick", persist::Json::number(point.tick));
+                gain.set("gain", persist::Json::number(point.gain));
+                automation.push(std::move(gain));
+            }
+            item.set("gainAutomation", std::move(automation));
+        }
+        persist::Json notes = persist::Json::array();
+        for (const auto& clip : track.clips) {
+            for (const auto& note : clip.notes) {
+                persist::Json noteJson = persist::Json::object();
+                noteJson.set("t", persist::Json::number(static_cast<double>(clip.startTick) + note.tick));
+                noteJson.set("d", persist::Json::number(note.duration));
+                noteJson.set("p", persist::Json::number(note.pitch));
+                noteJson.set("v", persist::Json::number(note.velocity));
+                notes.push(std::move(noteJson));
+            }
+        }
+        item.set("notes", std::move(notes));
+        tracks.push(std::move(item));
+    }
+    json.set("tracks", std::move(tracks));
+    persist::Json resources = persist::Json::array();
+    for (const auto& resource : song.resources) {
+        persist::Json item = persist::Json::object();
+        item.set("id", persist::Json::string(resource.id));
+        item.set("hash", persist::Json::string(resource.hash));
+        item.set("path", persist::Json::string(resource.path));
+        resources.push(std::move(item));
+    }
+    json.set("resources", std::move(resources));
+    const auto text = json.dump(-1);
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hex64(hash);
+}
 } // namespace
 
 persist::Json songReportJson(const SongRenderReport& report) {
@@ -246,6 +311,24 @@ persist::Json songReportJson(const SongRenderReport& report) {
     json.set("mixHash", persist::Json::string(report.mixHash));
     json.set("songHash", persist::Json::string(report.songHash));
     json.set("milliseconds", persist::Json::number(report.milliseconds));
+    persist::Json timing = persist::Json::object();
+    timing.set("prepareMs", persist::Json::number(report.timing.prepareMs));
+    timing.set("prerollMs", persist::Json::number(report.timing.prerollMs));
+    timing.set("dspMs", persist::Json::number(report.timing.dspMs));
+    timing.set("externalMs", persist::Json::number(report.timing.externalMs));
+    timing.set("mixMs", persist::Json::number(report.timing.mixMs));
+    timing.set("writeMs", persist::Json::number(report.timing.writeMs));
+    timing.set("analyzeMs", persist::Json::number(report.timing.analyzeMs));
+    timing.set("totalMs", persist::Json::number(report.timing.totalMs));
+    timing.set("renderedFrames", persist::Json::number(static_cast<double>(report.timing.renderedFrames)));
+    timing.set("emittedFrames", persist::Json::number(static_cast<double>(report.timing.emittedFrames)));
+    timing.set("realtimeFactor", persist::Json::number(report.timing.realtimeFactor));
+    json.set("timing", std::move(timing));
+    json.set("cacheHit", persist::Json::boolean(report.cacheHit));
+    json.set("cacheReason", persist::Json::string(report.cacheReason));
+    json.set("quality", persist::Json::string(report.quality));
+    json.set("renderId", persist::Json::string(report.renderId));
+    json.set("auditionStatus", persist::Json::string(report.auditionStatus));
     json.set("latencySamples", persist::Json::number(0));
     persist::Json stems = persist::Json::array();
     for (const auto& stem : report.stems) {
@@ -278,8 +361,47 @@ SongRenderReport renderSong(
     const std::filesystem::path& mixOutput,
     const std::filesystem::path& stemsDirectory) {
     const auto started = std::chrono::steady_clock::now();
+    const auto now = []() { return std::chrono::steady_clock::now(); };
+    const auto msBetween = [](std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+        return std::chrono::duration<double, std::milli>(to - from).count();
+    };
+    double prepareMs = 0;
+    double prerollMs = 0;
+    double dspMs = 0;
+    double externalMs = 0;
+    double mixMs = 0;
+    double writeMs = 0;
+    std::uint64_t renderedFrames = 0;
+    std::uint64_t emittedFrames = 0;
+    auto externalStarted = started;
+    bool externalRunning = false;
     auto finish = [&](SongRenderReport report) {
-        report.milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        report.milliseconds = msBetween(started, now());
+        if (prepareMs == 0 && dspMs == 0 && externalMs == 0 && mixMs == 0 && writeMs == 0 && prerollMs == 0) {
+            report.timing.prepareMs = report.milliseconds;
+        } else {
+            report.timing.prepareMs = prepareMs;
+        }
+        report.timing.prerollMs = prerollMs;
+        report.timing.dspMs = dspMs;
+        report.timing.externalMs = externalRunning ? msBetween(externalStarted, now()) : externalMs;
+        report.timing.mixMs = mixMs;
+        report.timing.writeMs = writeMs;
+        report.timing.analyzeMs = 0;
+        report.timing.totalMs = report.milliseconds;
+        if (report.timing.renderedFrames == 0) report.timing.renderedFrames = renderedFrames;
+        if (report.timing.emittedFrames == 0) report.timing.emittedFrames = emittedFrames;
+        if (report.milliseconds > 0.0 && options.sampleRate > 0.0) {
+            report.timing.realtimeFactor =
+                (static_cast<double>(report.timing.emittedFrames) / options.sampleRate) / (report.milliseconds * 0.001);
+        }
+        if (report.cacheReason.empty()) report.cacheReason = "cache-not-implemented";
+        if (report.quality.empty()) report.quality = "final";
+        if (report.auditionStatus.empty()) report.auditionStatus = "unheard";
+        if (report.renderId.empty()) {
+            report.renderId = hex64(static_cast<std::uint64_t>(now().time_since_epoch().count()));
+            if (!report.mixHash.empty()) report.renderId += report.mixHash;
+        }
         report.sampleRate = static_cast<std::uint32_t>(options.sampleRate);
         report.blockSize = options.blockSize;
         report.revision = song.revision;
@@ -304,6 +426,50 @@ SongRenderReport renderSong(
     }
 
     const auto rate = static_cast<std::uint32_t>(options.sampleRate);
+    const auto mixKey = fingerprint(song, options, true);
+    const auto cacheDir = options.cacheDirectory.empty() ? mixOutput.parent_path() / ".nod-cache" : options.cacheDirectory;
+    const auto cachedMix = cacheDir / mixKey / "mix.wav";
+    const bool preview = options.previewStartTick.has_value() || options.previewEndTick.has_value();
+    if (options.useCache && preview && std::filesystem::exists(cachedMix)) {
+        if (!options.previewStartTick || !options.previewEndTick || *options.previewEndTick < *options.previewStartTick) {
+            return finish(fail("invalid-options", "preview requires a start tick and an end tick"));
+        }
+        const auto startSample = sampleAtTick(song, *options.previewStartTick, rate);
+        const auto endSampleTick = sampleAtTick(song, *options.previewEndTick, rate);
+        if (!startSample || !endSampleTick) return finish(fail("sample-overflow", "preview time does not fit in a sample index"));
+        const auto tailBudget = static_cast<std::uint64_t>(std::llround(options.tailSeconds * options.sampleRate));
+        runtime::WavData wav;
+        std::string wavError;
+        if (!runtime::readWav(cachedMix, wav, wavError) || wav.channels != 2 || wav.sampleRate != rate) {
+            return finish(fail("cache-invalid", wavError.empty() ? "cached mix is unusable" : wavError));
+        }
+        const auto emitFrom = static_cast<std::uint64_t>(*startSample);
+        const auto emitUntil = std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(*endSampleTick) + tailBudget, wav.interleaved.size() / 2);
+        if (emitUntil < emitFrom) return finish(fail("invalid-options", "preview range is empty"));
+        runtime::WavData sliced;
+        sliced.sampleRate = rate;
+        sliced.channels = 2;
+        const auto begin = static_cast<std::size_t>(emitFrom) * 2;
+        const auto count = static_cast<std::size_t>(emitUntil - emitFrom) * 2;
+        sliced.interleaved.assign(wav.interleaved.begin() + static_cast<std::ptrdiff_t>(begin),
+            wav.interleaved.begin() + static_cast<std::ptrdiff_t>(begin + count));
+        if (!runtime::writeWav(mixOutput, sliced, wavError)) return finish(fail("output-io", wavError));
+        SongRenderReport report;
+        report.ok = true;
+        report.frames = sliced.interleaved.size() / 2;
+        report.originSample = emitFrom;
+        report.tailFrames = tailBudget;
+        report.message = "sliced";
+        report.cacheHit = true;
+        report.cacheReason = "slice-finished-mix";
+        float peak = 0.f;
+        for (float sample : sliced.interleaved) peak = std::max(peak, std::fabs(sample));
+        report.peak = peak;
+        report.mixHash = mixKey;
+        return finish(std::move(report));
+    }
+
     const bool writeStems = !stemsDirectory.empty();
     if (writeStems) {
         std::error_code failure;
@@ -470,6 +636,7 @@ SongRenderReport renderSong(
         }
     }
 
+    prepareMs = msBetween(started, now());
     const auto budgetSeconds = options.tailMode == render::TailMode::fixed ? options.tailSeconds : options.maxTailSeconds;
     const auto tailBudget = static_cast<std::uint64_t>(std::llround(budgetSeconds * options.sampleRate));
     const bool haveExternal = std::any_of(voices.begin(), voices.end(), [](const TrackVoice& voice) { return voice.externalTrack; });
@@ -489,6 +656,8 @@ SongRenderReport renderSong(
             std::filesystem::remove_all(path, ignored);
         }
     } cleanup{work, haveExternal};
+    externalStarted = now();
+    externalRunning = haveExternal;
     for (auto& voice : voices) {
         if (!voice.externalTrack) continue;
         const auto tool = std::find_if(options.tools.begin(), options.tools.end(), [&](const SongRenderOptions::ExternalTool& candidate) {
@@ -552,6 +721,8 @@ SongRenderReport renderSong(
         const auto drop = static_cast<std::size_t>(voice.latencySamples) * 2;
         if (drop > 0 && drop < voice.external.size()) voice.external.erase(voice.external.begin(), voice.external.begin() + static_cast<std::ptrdiff_t>(drop));
     }
+    if (haveExternal) externalMs = msBetween(externalStarted, now());
+    externalRunning = false;
     std::uint64_t externalFrames = 0;
     for (const auto& voice : voices) externalFrames = std::max(externalFrames, static_cast<std::uint64_t>(voice.external.size() / 2));
     const auto musicalFrames = static_cast<std::uint64_t>(endSample);
@@ -562,6 +733,7 @@ SongRenderReport renderSong(
     }
 
     std::string ioError;
+    const auto writeOpenStarted = now();
     auto mix = std::make_unique<runtime::WavStream>();
     if (!mix->open(mixOutput, rate, 2, ioError)) return finish(fail("output-io", ioError));
     std::vector<std::filesystem::path> committed;
@@ -571,8 +743,8 @@ SongRenderReport renderSong(
         voice.stemPath = stemsDirectory / (voice.trackId + ".wav");
         if (!voice.stem->open(voice.stemPath, rate, 2, ioError)) return finish(fail("output-io", ioError));
     }
+    writeMs += msBetween(writeOpenStarted, now());
 
-    const bool preview = options.previewStartTick.has_value() || options.previewEndTick.has_value();
     std::uint64_t emitFrom = 0;
     std::uint64_t emitUntil = ~std::uint64_t{0};
     if (preview) {
@@ -598,6 +770,9 @@ SongRenderReport renderSong(
     const auto renderChunk = [&](std::uint64_t rendered, std::uint32_t chunk) {
         std::fill(mixed.begin(), mixed.begin() + static_cast<std::size_t>(chunk) * 2, 0.f);
         float blockPeak = 0.f;
+        double chunkDsp = 0;
+        double chunkMix = 0;
+        double chunkWrite = 0;
         for (auto& voice : voices) {
             std::vector<runtime::MidiEvent> block;
             const auto blockEnd = static_cast<std::int64_t>(rendered + chunk);
@@ -609,6 +784,7 @@ SongRenderReport renderSong(
                 }
                 ++voice.cursor;
             }
+            const auto dspStarted = now();
             std::fill(left.begin(), left.begin() + chunk, 0.f);
             std::fill(right.begin(), right.begin() + chunk, 0.f);
             if (voice.externalTrack) {
@@ -622,6 +798,8 @@ SongRenderReport renderSong(
                 voice.engine->process(outputs, 2, chunk, block);
                 voice.engine->reclaim();
             }
+            const auto mixStarted = now();
+            chunkDsp += msBetween(dspStarted, mixStarted);
             for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                 const auto sample = static_cast<std::int64_t>(rendered + frame);
                 float gainLeft = 0.f;
@@ -634,6 +812,8 @@ SongRenderReport renderSong(
                 mixed[static_cast<std::size_t>(frame) * 2] += sampleLeft;
                 mixed[static_cast<std::size_t>(frame) * 2 + 1] += sampleRight;
             }
+            const auto writeStarted = now();
+            chunkMix += msBetween(mixStarted, writeStarted);
             const auto chunkBegin = rendered;
             const auto chunkEnd = rendered + chunk;
             const auto keepBegin = std::max(chunkBegin, emitFrom);
@@ -651,11 +831,13 @@ SongRenderReport renderSong(
                 blockPeak = std::max(blockPeak, stemPeak);
                 if (voice.stem && !voice.stem->write(stem.data() + first * 2, count * 2, ioError)) return -1.f;
             }
+            chunkWrite += msBetween(writeStarted, now());
         }
         const auto chunkBegin = rendered;
         const auto chunkEnd = rendered + chunk;
         const auto keepBegin = std::max(chunkBegin, emitFrom);
         const auto keepEnd = std::min(chunkEnd, emitUntil);
+        const auto mixWriteStarted = now();
         if (keepEnd > keepBegin) {
             const auto first = static_cast<std::size_t>(keepBegin - chunkBegin);
             const auto count = static_cast<std::size_t>(keepEnd - keepBegin);
@@ -666,6 +848,20 @@ SongRenderReport renderSong(
             mixContentHash = mixHash(mixContentHash, mixed.data() + first * 2, count * 2);
             writtenFrames += count;
             if (!mix->write(mixed.data() + first * 2, count * 2, ioError)) return -1.f;
+        }
+        chunkWrite += msBetween(mixWriteStarted, now());
+        if (chunkEnd <= emitFrom) {
+            prerollMs += chunkDsp + chunkMix;
+        } else if (rendered < emitFrom) {
+            const double prerollFrac = static_cast<double>(emitFrom - rendered) / static_cast<double>(chunk);
+            prerollMs += prerollFrac * (chunkDsp + chunkMix);
+            dspMs += (1.0 - prerollFrac) * chunkDsp;
+            mixMs += (1.0 - prerollFrac) * chunkMix;
+            writeMs += chunkWrite;
+        } else {
+            dspMs += chunkDsp;
+            mixMs += chunkMix;
+            writeMs += chunkWrite;
         }
         return blockPeak;
     };
@@ -691,6 +887,7 @@ SongRenderReport renderSong(
         }
         const auto previewEnd = emitUntil > tailBudget ? emitUntil - tailBudget : 0;
         const auto previewTail = rendered > previewEnd ? rendered - previewEnd : 0;
+        const auto commitStarted = now();
         for (auto& voice : voices) {
             if (!voice.stem) continue;
             if (!voice.stem->commit(ioError)) {
@@ -703,9 +900,14 @@ SongRenderReport renderSong(
             discard();
             return finish(fail("output-io", ioError));
         }
+        writeMs += msBetween(commitStarted, now());
+        renderedFrames = rendered;
+        emittedFrames = writtenFrames;
         SongRenderReport report;
         report.ok = true;
         report.frames = writtenFrames;
+        report.timing.renderedFrames = rendered;
+        report.timing.emittedFrames = writtenFrames;
         report.originSample = emitFrom;
         report.tailFrames = std::min<std::uint64_t>(previewTail, writtenFrames);
         report.peak = mixPeak;
@@ -769,6 +971,7 @@ SongRenderReport renderSong(
         }
         tailTruncated = hot && tailFrames >= tailBudget;
     }
+    const auto commitStarted = now();
     for (auto& voice : voices) {
         if (!voice.stem) continue;
         if (!voice.stem->commit(ioError)) {
@@ -781,10 +984,15 @@ SongRenderReport renderSong(
         discard();
         return finish(fail("output-io", ioError));
     }
+    writeMs += msBetween(commitStarted, now());
+    renderedFrames = rendered;
+    emittedFrames = writtenFrames;
 
     SongRenderReport report;
     report.ok = true;
     report.frames = writtenFrames;
+    report.timing.renderedFrames = rendered;
+    report.timing.emittedFrames = writtenFrames;
     report.originSample = emitFrom;
     report.tailFrames = tailFrames;
     report.tailTruncated = tailTruncated;
@@ -812,6 +1020,17 @@ SongRenderReport renderSong(
                 {"non-deterministic", "FluidSynth output is not bit-exact across machines or versions", 0, -1, voice.trackId});
         }
         report.stems.push_back(std::move(stem));
+    }
+    if (options.useCache && !preview) {
+        std::error_code failure;
+        std::filesystem::create_directories(cachedMix.parent_path(), failure);
+        if (!failure) {
+            std::filesystem::copy_file(mixOutput, cachedMix, std::filesystem::copy_options::overwrite_existing, failure);
+            if (!failure) {
+                report.cacheHit = false;
+                report.cacheReason = "stored-finished-mix";
+            }
+        }
     }
     return finish(std::move(report));
 }

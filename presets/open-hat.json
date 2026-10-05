@@ -1,0 +1,86 @@
+{
+  "format": "nodsynth.project",
+  "formatVersion": 1,
+  "viewport": {
+    "originX": 0,
+    "originY": 0,
+    "zoom": 1
+  },
+  "nodes": [
+    {
+      "id": "midi",
+      "typeId": "nod.midi-input",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": { "x": 40, "y": 120 }
+    },
+    {
+      "id": "noise",
+      "typeId": "nod.noise",
+      "schemaVersion": 1,
+      "parameters": {
+        "level": 0.38,
+        "seed": 23
+      },
+      "opaqueState": "{}",
+      "position": { "x": 300, "y": 80 }
+    },
+    {
+      "id": "highpass",
+      "typeId": "nod.highpass",
+      "schemaVersion": 1,
+      "parameters": {
+        "cutoff": 6200,
+        "resonance": 0.1
+      },
+      "opaqueState": "{}",
+      "position": { "x": 560, "y": 80 }
+    },
+    {
+      "id": "envelope",
+      "typeId": "nod.adsr",
+      "schemaVersion": 1,
+      "parameters": {
+        "attack": 0.001,
+        "decay": 0.22,
+        "sustain": 0.05,
+        "release": 0.18
+      },
+      "opaqueState": "{}",
+      "position": { "x": 300, "y": 240 }
+    },
+    {
+      "id": "gain",
+      "typeId": "nod.gain",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": { "x": 820, "y": 120 }
+    },
+    {
+      "id": "voice-mix",
+      "typeId": "nod.voice-mix",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": { "x": 1080, "y": 120 }
+    },
+    {
+      "id": "audio-output",
+      "typeId": "nod.audio-output",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": { "x": 1320, "y": 120 }
+    }
+  ],
+  "connections": [
+    { "from": { "node": "midi", "port": "gate" }, "to": { "node": "envelope", "port": "gate" } },
+    { "from": { "node": "noise", "port": "audio" }, "to": { "node": "highpass", "port": "audio-in" } },
+    { "from": { "node": "highpass", "port": "audio-out" }, "to": { "node": "gain", "port": "audio-in" } },
+    { "from": { "node": "envelope", "port": "envelope" }, "to": { "node": "gain", "port": "gain" } },
+    { "from": { "node": "gain", "port": "audio-out" }, "to": { "node": "voice-mix", "port": "voices" } },
+    { "from": { "node": "voice-mix", "port": "audio" }, "to": { "node": "audio-output", "port": "audio" } }
+  ]
+}

@@ -72,11 +72,13 @@ target_link_libraries(nod_render PRIVATE nod_render_core)
 
 add_library(nod_song
   src/song/SongDocument.cpp
+  src/song/SongQuery.cpp
   src/song/MidiSong.cpp
   src/song/Process.cpp
   src/song/AudioAnalysis.cpp
   src/song/SongRenderer.cpp
   src/song/ModelClient.cpp
+  src/song/Presets.cpp
 )
 target_include_directories(nod_song PUBLIC include)
 target_link_libraries(nod_song PUBLIC nod_render_core)

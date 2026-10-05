@@ -1,4 +1,5 @@
 #include <nodsynth/song/SongDocument.h>
+#include <nodsynth/song/Presets.h>
 
 #include <algorithm>
 #include <cmath>
@@ -170,7 +171,8 @@ std::string freshId(const SongDocument& song, const char* prefix) {
     return std::string(prefix) + "-" + std::to_string(highest + 1);
 }
 
-bool applyOne(SongDocument& song, const persist::Json& command, std::string& error) {
+bool applyOne(SongDocument& song, const persist::Json& command, std::string& error, persist::Json& idMap) {
+    (void)idMap;
     const auto* op = command.find("op");
     if (op == nullptr || op->kind() != persist::Json::Kind::string) {
         error = "a command is missing op";
@@ -340,6 +342,10 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
             error = "add-note requires tick, duration, pitch, and velocity";
             return false;
         }
+        if (clip->length != 0 && note.tick + note.duration > clip->length) {
+            error = "note extends past the clip length";
+            return false;
+        }
         if (const auto* channel = command.find("channel")) {
             if (!readU8(channel, note.channel) || note.channel > 15) {
                 error = "note channel is invalid";
@@ -379,6 +385,309 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         error = "note was not found";
         return false;
     }
+    if (name == "create-track") {
+        Track track;
+        const auto* id = command.find("id");
+        track.id = id != nullptr && id->kind() == persist::Json::Kind::string && !id->asString().empty() ? id->asString()
+                                                                                                       : freshId(song, "track");
+        if (findTrack(song, track.id) != nullptr) {
+            error = "track id already exists";
+            return false;
+        }
+        if (const auto* trackName = command.find("name"); trackName != nullptr) track.name = trackName->asString();
+        else track.name = track.id;
+        std::uint32_t order = static_cast<std::uint32_t>(song.tracks.size());
+        if (const auto* value = command.find("order")) {
+            if (!readU32(value, order)) {
+                error = "track order is invalid";
+                return false;
+            }
+        }
+        track.order = static_cast<int>(order);
+        song.tracks.push_back(std::move(track));
+        idMap.set(song.tracks.back().id, persist::Json::string(song.tracks.back().id));
+        if (id != nullptr && id->kind() == persist::Json::Kind::string) idMap.set(id->asString(), persist::Json::string(song.tracks.back().id));
+        return true;
+    }
+    if (name == "delete-track") {
+        const auto* trackId = command.find("track");
+        if (trackId == nullptr) {
+            error = "delete-track requires a track";
+            return false;
+        }
+        const auto found = std::find_if(song.tracks.begin(), song.tracks.end(), [&](const Track& track) {
+            return track.id == trackId->asString();
+        });
+        if (found == song.tracks.end()) {
+            error = "track was not found";
+            return false;
+        }
+        song.tracks.erase(found);
+        return true;
+    }
+    if (name == "rename-track") {
+        const auto* trackId = command.find("track");
+        const auto* trackName = command.find("name");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr || trackName == nullptr) {
+            error = "rename-track requires a track and name";
+            return false;
+        }
+        track->name = trackName->asString();
+        return true;
+    }
+    if (name == "reorder-track") {
+        const auto* trackId = command.find("track");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        std::uint32_t order = 0;
+        if (track == nullptr || !readU32(command.find("order"), order)) {
+            error = "reorder-track requires a track and order";
+            return false;
+        }
+        track->order = static_cast<int>(order);
+        return true;
+    }
+    if (name == "create-clip") {
+        const auto* trackId = command.find("track");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr) {
+            error = "track was not found";
+            return false;
+        }
+        Clip clip;
+        const auto* id = command.find("id");
+        clip.id = id != nullptr && id->kind() == persist::Json::Kind::string && !id->asString().empty() ? id->asString()
+                                                                                                      : freshId(song, "clip");
+        for (const auto& existing : song.tracks) {
+            for (const auto& existingClip : existing.clips) {
+                if (existingClip.id == clip.id) {
+                    error = "clip id already exists";
+                    return false;
+                }
+            }
+        }
+        if (!readU32(command.find("startTick"), clip.startTick)) clip.startTick = 0;
+        if (!readU32(command.find("length"), clip.length) || clip.length == 0) clip.length = song.ppq * 4;
+        track->clips.push_back(clip);
+        idMap.set(clip.id, persist::Json::string(clip.id));
+        return true;
+    }
+    if (name == "delete-clip") {
+        const auto* trackId = command.find("track");
+        const auto* clipId = command.find("clip");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr || clipId == nullptr) {
+            error = "delete-clip requires a track and clip";
+            return false;
+        }
+        const auto found = std::find_if(track->clips.begin(), track->clips.end(), [&](const Clip& clip) {
+            return clip.id == clipId->asString();
+        });
+        if (found == track->clips.end()) {
+            error = "clip was not found";
+            return false;
+        }
+        track->clips.erase(found);
+        return true;
+    }
+    if (name == "duplicate-clip") {
+        const auto* trackId = command.find("track");
+        const auto* clipId = command.find("clip");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        auto* clip = track == nullptr || clipId == nullptr ? nullptr : findClip(*track, clipId->asString());
+        if (clip == nullptr) {
+            error = "clip was not found";
+            return false;
+        }
+        Clip copy = *clip;
+        const auto* id = command.find("id");
+        copy.id = id != nullptr && id->kind() == persist::Json::Kind::string && !id->asString().empty() ? id->asString()
+                                                                                                      : freshId(song, "clip");
+        if (const auto* start = command.find("startTick")) {
+            if (!readU32(start, copy.startTick)) {
+                error = "clip startTick is invalid";
+                return false;
+            }
+        } else {
+            copy.startTick = clip->startTick + clip->length;
+        }
+        for (auto& note : copy.notes) note.id = freshId(song, "note");
+        track->clips.push_back(copy);
+        idMap.set(copy.id, persist::Json::string(copy.id));
+        return true;
+    }
+    if (name == "add-notes") {
+        const auto* trackId = command.find("track");
+        const auto* notes = command.find("notes");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr || notes == nullptr || notes->kind() != persist::Json::Kind::array) {
+            error = "add-notes requires a track and notes";
+            return false;
+        }
+        Clip* clip = nullptr;
+        if (const auto* clipId = command.find("clip"); clipId != nullptr) clip = findClip(*track, clipId->asString());
+        else if (!track->clips.empty()) clip = &track->clips.front();
+        if (clip == nullptr) {
+            error = "clip was not found";
+            return false;
+        }
+        for (const auto& item : notes->asArray()) {
+            persist::Json one = persist::Json::object();
+            one.set("op", persist::Json::string("add-note"));
+            one.set("track", persist::Json::string(track->id));
+            one.set("clip", persist::Json::string(clip->id));
+            if (const auto* id = item.find("id")) one.set("id", *id);
+            if (const auto* tick = item.find("tick")) one.set("tick", *tick);
+            if (const auto* duration = item.find("duration")) one.set("duration", *duration);
+            if (const auto* pitch = item.find("pitch")) one.set("pitch", *pitch);
+            if (const auto* velocity = item.find("velocity")) one.set("velocity", *velocity);
+            if (const auto* channel = item.find("channel")) one.set("channel", *channel);
+            if (!applyOne(song, one, error, idMap)) return false;
+        }
+        return true;
+    }
+    if (name == "update-note") {
+        const auto* trackId = command.find("track");
+        const auto* noteId = command.find("note");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr || noteId == nullptr) {
+            error = "update-note requires a track and note";
+            return false;
+        }
+        for (auto& clip : track->clips) {
+            for (auto& note : clip.notes) {
+                if (note.id != noteId->asString()) continue;
+                if (const auto* tick = command.find("tick"); tick != nullptr && !readU32(tick, note.tick)) {
+                    error = "note tick is invalid";
+                    return false;
+                }
+                if (const auto* duration = command.find("duration"); duration != nullptr && !readU32(duration, note.duration)) {
+                    error = "note duration is invalid";
+                    return false;
+                }
+                if (const auto* pitch = command.find("pitch"); pitch != nullptr && !readU8(pitch, note.pitch)) {
+                    error = "note pitch is invalid";
+                    return false;
+                }
+                if (const auto* velocity = command.find("velocity"); velocity != nullptr && !readU8(velocity, note.velocity)) {
+                    error = "note velocity is invalid";
+                    return false;
+                }
+                if (clip.length != 0 && note.tick + note.duration > clip.length) {
+                    error = "note extends past the clip length";
+                    return false;
+                }
+                return true;
+            }
+        }
+        error = "note was not found";
+        return false;
+    }
+    if (name == "delete-notes") {
+        const auto* trackId = command.find("track");
+        const auto* notes = command.find("notes");
+        auto* track = trackId == nullptr ? nullptr : findTrack(song, trackId->asString());
+        if (track == nullptr || notes == nullptr || notes->kind() != persist::Json::Kind::array) {
+            error = "delete-notes requires a track and notes";
+            return false;
+        }
+        for (const auto& item : notes->asArray()) {
+            persist::Json one = persist::Json::object();
+            one.set("op", persist::Json::string("delete-note"));
+            one.set("track", persist::Json::string(track->id));
+            one.set("note", item.kind() == persist::Json::Kind::string ? item : persist::Json::string(item.find("id") ? item.find("id")->asString() : ""));
+            if (!applyOne(song, one, error, idMap)) return false;
+        }
+        return true;
+    }
+    if (name == "set-tempo") {
+        song.tempo.clear();
+        if (const auto* points = command.find("points"); points != nullptr && points->kind() == persist::Json::Kind::array) {
+            for (const auto& item : points->asArray()) {
+                TempoPoint point;
+                if (!readU32(item.find("tick"), point.tick)) {
+                    error = "tempo tick is invalid";
+                    return false;
+                }
+                if (const auto* bpm = item.find("bpm"); bpm != nullptr) {
+                    double value = 0;
+                    if (!finiteNumber(bpm, value) || value <= 0) {
+                        error = "tempo bpm is invalid";
+                        return false;
+                    }
+                    point.microsecondsPerQuarter = static_cast<std::uint32_t>(std::llround(60000000.0 / value));
+                } else if (!readU32(item.find("microsecondsPerQuarter"), point.microsecondsPerQuarter) ||
+                           point.microsecondsPerQuarter == 0) {
+                    error = "tempo is invalid";
+                    return false;
+                }
+                song.tempo.push_back(point);
+            }
+        } else {
+            TempoPoint point;
+            double bpm = 0;
+            if (!finiteNumber(command.find("bpm"), bpm) || bpm <= 0) {
+                error = "set-tempo requires bpm or points";
+                return false;
+            }
+            point.microsecondsPerQuarter = static_cast<std::uint32_t>(std::llround(60000000.0 / bpm));
+            song.tempo.push_back(point);
+        }
+        if (song.tempo.empty() || song.tempo.front().tick != 0) {
+            error = "tempo map must start at tick 0";
+            return false;
+        }
+        return true;
+    }
+    if (name == "set-time-signature") {
+        TimeSignaturePoint point;
+        std::uint32_t numerator = 4;
+        if (const auto* tick = command.find("tick"); tick != nullptr && !readU32(tick, point.tick)) {
+            error = "time signature tick is invalid";
+            return false;
+        }
+        if (!readU32(command.find("numerator"), numerator) || numerator == 0 || numerator > 255 ||
+            !readU16(command.find("denominator"), point.denominator) || point.denominator == 0) {
+            error = "set-time-signature requires numerator and denominator";
+            return false;
+        }
+        point.numerator = static_cast<std::uint8_t>(numerator);
+        if (point.tick == 0) song.timeSignatures.clear();
+        song.timeSignatures.push_back(point);
+        return true;
+    }
+    if (name == "set-song-range") {
+        std::uint32_t end = 0;
+        if (const auto* bars = command.find("bars"); bars != nullptr) {
+            std::uint32_t count = 0;
+            if (!readU32(bars, count) || count == 0) {
+                error = "song range bars are invalid";
+                return false;
+            }
+            std::string barError;
+            std::uint32_t startTick = 0;
+            if (!barsToTicks(song, 1, count + 1, startTick, end, barError)) {
+                error = barError;
+                return false;
+            }
+        } else if (!readU32(command.find("endTick"), end)) {
+            error = "set-song-range requires endTick or bars";
+            return false;
+        }
+        song.songRangeEndTick = end;
+        return true;
+    }
+    if (name == "bind-preset") {
+        const auto* trackId = command.find("track");
+        const auto* preset = command.find("preset");
+        if (trackId == nullptr || preset == nullptr) {
+            error = "bind-preset requires a track and preset";
+            return false;
+        }
+        std::filesystem::path root = defaultPresetsRoot();
+        if (const auto* presets = command.find("presetsRoot"); presets != nullptr) root = presets->asString();
+        return bindPreset(song, trackId->asString(), preset->asString(), root, error);
+    }
     error = "unknown command";
     return false;
 }
@@ -407,6 +716,7 @@ persist::Json toJson(const SongDocument& song) {
     json.set("formatVersion", persist::Json::number(song.version));
     json.set("revision", persist::Json::number(static_cast<double>(song.revision)));
     json.set("ppq", persist::Json::number(song.ppq));
+    if (song.songRangeEndTick) json.set("songRangeEndTick", persist::Json::number(*song.songRangeEndTick));
     if (!song.sourceMidiHash.empty()) json.set("sourceMidiHash", persist::Json::string(song.sourceMidiHash));
     persist::Json tempo = persist::Json::array();
     for (const auto& point : song.tempo) {
@@ -454,6 +764,7 @@ persist::Json toJson(const SongDocument& song) {
         item.set("instrument", persist::Json::string(track.instrumentId));
         item.set("gain", persist::Json::number(track.gain));
         item.set("pan", persist::Json::number(track.pan));
+        item.set("order", persist::Json::number(track.order));
         if (track.sourceTrack) item.set("sourceTrack", persist::Json::number(*track.sourceTrack));
         if (track.sourceChannel) item.set("sourceChannel", persist::Json::number(*track.sourceChannel));
         persist::Json clips = persist::Json::array();
@@ -461,6 +772,7 @@ persist::Json toJson(const SongDocument& song) {
             persist::Json clipJson = persist::Json::object();
             clipJson.set("id", persist::Json::string(clip.id));
             clipJson.set("startTick", persist::Json::number(clip.startTick));
+            clipJson.set("length", persist::Json::number(clip.length));
             persist::Json notes = persist::Json::array();
             for (const auto& note : clip.notes) {
                 persist::Json noteJson = persist::Json::object();
@@ -556,7 +868,8 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
         return std::nullopt;
     }
     std::uint32_t versionNumber = 0;
-    if (!readU32(version, versionNumber) || versionNumber != static_cast<std::uint32_t>(kSongFormatVersion)) {
+    if (!readU32(version, versionNumber) || versionNumber < static_cast<std::uint32_t>(kMinSupportedSongFormatVersion) ||
+        versionNumber > static_cast<std::uint32_t>(kSongFormatVersion)) {
         error = "the song version is not supported";
         return std::nullopt;
     }
@@ -573,6 +886,14 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
         return std::nullopt;
     }
     if (const auto* value = json.find("sourceMidiHash"); value != nullptr) song.sourceMidiHash = value->asString();
+    if (const auto* value = json.find("songRangeEndTick"); value != nullptr) {
+        std::uint32_t end = 0;
+        if (!readU32(value, end)) {
+            error = "song range is invalid";
+            return std::nullopt;
+        }
+        song.songRangeEndTick = end;
+    }
     if (const auto* tempo = json.find("tempo"); tempo != nullptr) {
         if (tempo->kind() != persist::Json::Kind::array) {
             error = "tempo must be an array";
@@ -681,6 +1002,14 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
             }
             track.gain = gain;
             track.pan = pan;
+            if (const auto* value = item.find("order"); value != nullptr) {
+                std::uint32_t order = 0;
+                if (!readU32(value, order) || order > 2147483647u) {
+                    error = "track order is invalid";
+                    return false;
+                }
+                track.order = static_cast<int>(order);
+            }
             std::uint16_t sourceTrack = 0;
             std::uint8_t sourceChannel = 0;
             if (const auto* value = item.find("sourceTrack")) {
@@ -710,6 +1039,10 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                         return false;
                     }
                     clip.id = clipId->asString();
+                    if (const auto* length = clipJson.find("length"); length != nullptr && !readU32(length, clip.length)) {
+                        error = "a clip length is invalid";
+                        return false;
+                    }
                     if (const auto* notes = clipJson.find("notes"); notes != nullptr) {
                         if (notes->kind() != persist::Json::Kind::array) {
                             error = "notes must be an array";
@@ -728,6 +1061,12 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                             note.id = noteId->asString();
                             clip.notes.push_back(std::move(note));
                         }
+                    }
+                    if (clip.length == 0) {
+                        for (const auto& note : clip.notes) {
+                            clip.length = std::max(clip.length, note.tick + note.duration);
+                        }
+                        if (clip.length == 0) clip.length = song.ppq * 4;
                     }
                     track.clips.push_back(std::move(clip));
                 }
@@ -880,6 +1219,13 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
         });
     };
     if (!readStack("undo", song.undoStack) || !readStack("redo", song.redoStack)) return std::nullopt;
+    bool allZeroOrder = true;
+    for (const auto& track : song.tracks) {
+        if (track.order != 0) allZeroOrder = false;
+    }
+    if (allZeroOrder) {
+        for (int index = 0; index < static_cast<int>(song.tracks.size()); ++index) song.tracks[static_cast<std::size_t>(index)].order = index;
+    }
     return song;
 }
 
@@ -922,7 +1268,9 @@ bool saveSong(const std::filesystem::path& path, const SongDocument& song, std::
     return true;
 }
 
-Validation validate(const SongDocument& song) {
+Validation validate(const SongDocument& song) { return validateDocument(song); }
+
+Validation validateDocument(const SongDocument& song) {
     Validation result;
     if (song.version != kSongFormatVersion) result.diagnostics.push_back({"version", "song version is not supported"});
     if (song.ppq == 0) result.diagnostics.push_back({"ppq", "ppq must be positive"});
@@ -979,6 +1327,21 @@ Validation validate(const SongDocument& song) {
         for (const auto& event : track.performance) addUnique(ids, event.id, "performance", result);
     }
     result.ok = result.diagnostics.empty();
+    return result;
+}
+
+Validation validateRenderReady(const SongDocument& song) {
+    auto result = validateDocument(song);
+    for (const auto& track : song.tracks) {
+        bool hasMusic = !track.performance.empty();
+        for (const auto& clip : track.clips) {
+            if (!clip.notes.empty()) hasMusic = true;
+        }
+        if (hasMusic && track.instrumentId.empty()) {
+            result.diagnostics.push_back({"missing-patch", "a track with music has no instrument", 0, -1, track.id});
+            result.ok = false;
+        }
+    }
     return result;
 }
 
@@ -1063,46 +1426,6 @@ std::optional<SongDocument> songFromImage(const std::string& image, std::string&
 }
 } // namespace
 
-persist::Json querySong(const SongDocument& song, std::optional<std::uint32_t> startTick, std::optional<std::uint32_t> endTick) {
-    persist::Json json = persist::Json::object();
-    json.set("revision", persist::Json::number(static_cast<double>(song.revision)));
-    json.set("ppq", persist::Json::number(song.ppq));
-    persist::Json capabilities = persist::Json::object();
-    persist::Json commands = persist::Json::array();
-    for (const char* command : {"set-instrument", "set-gain", "set-pan", "set-gain-automation", "set-parameter-automation", "move-clip", "move-note", "add-note", "delete-note"}) {
-        commands.push(persist::Json::string(command));
-    }
-    capabilities.set("commands", std::move(commands));
-    persist::Json midi = persist::Json::array();
-    for (const char* event : {"note-on", "note-off", "pitch-bend", "control-change:64", "control-change:120", "control-change:123"}) {
-        midi.push(persist::Json::string(event));
-    }
-    capabilities.set("midi", std::move(midi));
-    persist::Json automation = persist::Json::array();
-    automation.push(persist::Json::string("track-gain"));
-    capabilities.set("automation", std::move(automation));
-    capabilities.set("undo", persist::Json::boolean(!song.undoStack.empty()));
-    capabilities.set("redo", persist::Json::boolean(!song.redoStack.empty()));
-    json.set("capabilities", std::move(capabilities));
-    persist::Json tracks = persist::Json::array();
-    for (const auto& track : song.tracks) {
-        persist::Json item = persist::Json::object();
-        item.set("id", persist::Json::string(track.id));
-        item.set("name", persist::Json::string(track.name));
-        if (!track.clips.empty()) item.set("clip", persist::Json::string(track.clips.front().id));
-        tracks.push(std::move(item));
-    }
-    json.set("tracks", std::move(tracks));
-    persist::Json notes = persist::Json::array();
-    for (const auto& note : listNotes(song)) {
-        if (startTick && note.tick < *startTick) continue;
-        if (endTick && note.tick >= *endTick) continue;
-        notes.push(noteJson(note));
-    }
-    json.set("notes", std::move(notes));
-    return json;
-}
-
 ApplyResult undoSong(SongDocument& song) {
     ApplyResult result;
     result.revision = song.revision;
@@ -1125,8 +1448,10 @@ ApplyResult undoSong(SongDocument& song) {
     }
     restored->undoStack = std::move(undo);
     restored->redoStack = std::move(redo);
+    result.diff = semanticDiff(song, *restored, false);
     song = std::move(*restored);
     result.ok = true;
+    result.baseRevision = result.revision;
     result.revision = song.revision;
     result.message = "undone";
     return result;
@@ -1154,16 +1479,19 @@ ApplyResult redoSong(SongDocument& song) {
     }
     restored->undoStack = std::move(undo);
     restored->redoStack = std::move(redo);
+    result.diff = semanticDiff(song, *restored, false);
     song = std::move(*restored);
     result.ok = true;
+    result.baseRevision = result.revision;
     result.revision = song.revision;
     result.message = "redone";
     return result;
 }
 
-ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::optional<std::uint64_t> expectRevision) {
+ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::optional<std::uint64_t> expectRevision, bool dryRun) {
     ApplyResult result;
     result.revision = song.revision;
+    result.baseRevision = song.revision;
     const auto* schema = batch.find("schemaVersion");
     std::uint32_t schemaVersion = 0;
     if (schema == nullptr || !readU32(schema, schemaVersion) || schemaVersion != 1) {
@@ -1175,11 +1503,18 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
     if (const auto* request = batch.find("requestId"); request != nullptr && request->kind() == persist::Json::Kind::string) {
         requestId = request->asString();
     }
+    result.requestId = requestId;
     if (!requestId.empty() &&
         std::find(song.appliedRequests.begin(), song.appliedRequests.end(), requestId) != song.appliedRequests.end()) {
         result.ok = true;
         result.unchanged = true;
+        result.noop = true;
         result.message = "request already applied";
+        result.diff = persist::Json::object();
+        result.diff.set("changes", persist::Json::array());
+        result.diff.set("added", persist::Json::array());
+        result.diff.set("removed", persist::Json::array());
+        result.diff.set("changedEntityCount", persist::Json::number(0));
         return result;
     }
     if (expectRevision && *expectRevision != song.revision) {
@@ -1194,43 +1529,47 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         result.message = "commands must be an array";
         return result;
     }
-    const auto before = listNotes(song);
     const auto image = historyImage(song);
     SongDocument next = song;
+    persist::Json idMap = persist::Json::object();
     for (const auto& command : commands->asArray()) {
         std::string error;
-        if (!applyOne(next, command, error)) {
+        if (!applyOne(next, command, error, idMap)) {
             result.code = "bad-command";
             result.message = error;
             return result;
         }
+    }
+    const auto validation = validateDocument(next);
+    if (!validation.ok && validateDocument(song).ok) {
+        result.code = "invalid-song";
+        result.message = validation.diagnostics.empty() ? "song failed validation" : validation.diagnostics.front().message;
+        return result;
+    }
+    result.diff = semanticDiff(song, next, false);
+    result.idMap = std::move(idMap);
+    const auto* count = result.diff.find("changedEntityCount");
+    const bool semanticChange = count != nullptr && count->asNumber() > 0;
+    if (!semanticChange) {
+        result.ok = true;
+        result.unchanged = true;
+        result.noop = true;
+        result.message = "no semantic change";
+        if (!requestId.empty() && !dryRun) {
+            song.appliedRequests.push_back(requestId);
+        }
+        return result;
     }
     if (!requestId.empty()) next.appliedRequests.push_back(requestId);
     ++next.revision;
     next.undoStack.push_back(image);
     next.redoStack.clear();
     if (next.undoStack.size() > 32) next.undoStack.erase(next.undoStack.begin());
-    persist::Json added = persist::Json::array();
-    persist::Json removed = persist::Json::array();
-    persist::Json changed = persist::Json::array();
-    const auto after = listNotes(next);
-    for (const auto& note : after) {
-        const auto found = std::find_if(before.begin(), before.end(), [&](const ListedNote& item) { return item.id == note.id; });
-        if (found == before.end()) added.push(noteJson(note));
-        else if (!sameNote(*found, note)) changed.push(noteJson(note));
-    }
-    for (const auto& note : before) {
-        const auto found = std::find_if(after.begin(), after.end(), [&](const ListedNote& item) { return item.id == note.id; });
-        if (found == after.end()) removed.push(noteJson(note));
-    }
-    result.diff = persist::Json::object();
-    result.diff.set("added", std::move(added));
-    result.diff.set("removed", std::move(removed));
-    result.diff.set("changed", std::move(changed));
-    song = std::move(next);
     result.ok = true;
-    result.revision = song.revision;
-    result.message = "applied";
+    result.revision = next.revision;
+    result.message = dryRun ? "previewed" : "applied";
+    if (!dryRun) song = std::move(next);
+    else result.revision = song.revision;
     return result;
 }
 

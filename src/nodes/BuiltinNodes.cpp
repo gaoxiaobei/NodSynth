@@ -105,6 +105,13 @@ model::SchemaRegistry builtinRegistry() {
                        },
                        {parameter("gain", "Gain", "", 0, 4, 1, ParameterScale::linear, true)}));
     must(registry, make(
+                       "nod.noise", "Noise", "Source", NodeScope::perVoice,
+                       {port("audio", "Audio", PortDirection::output, PortKind::audio, 1, PortDomain::sameAsNode)},
+                       {
+                           parameter("level", "Level", "", 0, 1, 0.2, ParameterScale::linear, true),
+                           parameter("seed", "Seed", "", 0, 2147483647, 1, ParameterScale::linear, false),
+                       }));
+    must(registry, make(
                        "nod.lowpass", "Lowpass", "Audio", NodeScope::perVoice,
                        {
                            port("audio-in", "Audio In", PortDirection::input, PortKind::audio, 1, PortDomain::sameAsNode),
@@ -114,6 +121,18 @@ model::SchemaRegistry builtinRegistry() {
                        },
                        {
                            parameter("cutoff", "Cutoff", "Hz", 20, 20000, 1000, ParameterScale::logarithmic, true),
+                           parameter("resonance", "Resonance", "", 0, 1, 0.1, ParameterScale::linear, true),
+                       }));
+    must(registry, make(
+                       "nod.highpass", "Highpass", "Audio", NodeScope::perVoice,
+                       {
+                           port("audio-in", "Audio In", PortDirection::input, PortKind::audio, 1, PortDomain::sameAsNode),
+                           port("cutoff", "Cutoff", PortDirection::input, PortKind::control, 1, PortDomain::sameAsNode),
+                           port("resonance", "Resonance", PortDirection::input, PortKind::control, 1, PortDomain::sameAsNode),
+                           port("audio-out", "Audio Out", PortDirection::output, PortKind::audio, 1, PortDomain::sameAsNode),
+                       },
+                       {
+                           parameter("cutoff", "Cutoff", "Hz", 20, 20000, 4000, ParameterScale::logarithmic, true),
                            parameter("resonance", "Resonance", "", 0, 1, 0.1, ParameterScale::linear, true),
                        }));
     must(registry, make(

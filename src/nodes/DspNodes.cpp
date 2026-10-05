@@ -245,9 +245,49 @@ private:
     runtime::ParamView parameters_{};
 };
 
-class Lowpass final : public runtime::DspNode {
+class Noise final : public runtime::DspNode {
 public:
     void bind(const NodeBinding& binding) override {
+        audio_ = port(binding.outputs, "audio");
+        parameters_ = binding.parameters;
+        velocity_ = binding.velocity;
+        triggers_ = binding.triggers;
+        states_.assign(binding.voiceCount, 0u);
+        primed_.assign(binding.voiceCount, 0);
+    }
+    void reset() override {
+        std::fill(states_.begin(), states_.end(), 0u);
+        std::fill(primed_.begin(), primed_.end(), 0);
+    }
+    void process(std::uint32_t voice, std::uint32_t frames) override {
+        for (std::uint32_t frame = 0; frame < frames; ++frame) {
+            const auto seed = static_cast<std::uint32_t>(
+                std::llround(std::clamp(parameters_.count > 1 ? parameters_.at(1, frame) : 1.f, 0.f, 2147483647.f)));
+            const bool trigger = triggers_ != nullptr && triggers_[voice] != nullptr && triggers_[voice][frame] > 0.5f;
+            if (trigger || primed_[voice] == 0) {
+                states_[voice] = seed;
+                primed_[voice] = 1;
+            }
+            states_[voice] = states_[voice] * 1664525u + 1013904223u;
+            const auto bits = static_cast<std::int32_t>(states_[voice]) >> 8;
+            const float level = parameters_.count > 0 ? std::clamp(parameters_.at(0, frame), 0.f, 1.f) : 0.2f;
+            const float velocity = velocity_ != nullptr && velocity_[voice] != nullptr ? velocity_[voice][frame] : 1.f;
+            store(audio_, voice, 0, frame, static_cast<float>(bits) * (1.f / 8388608.f) * level * velocity);
+        }
+    }
+
+private:
+    BufferView audio_{};
+    runtime::ParamView parameters_{};
+    const float* const* velocity_{nullptr};
+    const float* const* triggers_{nullptr};
+    std::vector<std::uint32_t> states_;
+    std::vector<std::uint8_t> primed_;
+};
+
+class SvfFilter {
+public:
+    void bind(const NodeBinding& binding) {
         audio_ = port(binding.inputs, "audio-in");
         cutoff_ = port(binding.inputs, "cutoff");
         resonance_ = port(binding.inputs, "resonance");
@@ -256,8 +296,8 @@ public:
         sampleRate_ = binding.sampleRate;
         states_.assign(binding.voiceCount, {});
     }
-    void reset() override { std::fill(states_.begin(), states_.end(), State{}); }
-    void process(std::uint32_t voice, std::uint32_t frames) override {
+    void reset() { std::fill(states_.begin(), states_.end(), State{}); }
+    void process(std::uint32_t voice, std::uint32_t frames, bool highpass) {
         auto& state = states_[voice];
         for (std::uint32_t frame = 0; frame < frames; ++frame) {
             const float cutoff = std::clamp(
@@ -275,7 +315,7 @@ public:
             state.ic1 = 2.f * v1 - state.ic1;
             state.ic2 = 2.f * v2 - state.ic2;
             if (!std::isfinite(state.ic1) || !std::isfinite(state.ic2)) state = {};
-            store(output_, voice, 0, frame, state.ic2);
+            store(output_, voice, 0, frame, highpass ? input - k * v1 - v2 : state.ic2);
         }
     }
 
@@ -291,6 +331,26 @@ private:
     runtime::ParamView parameters_{};
     double sampleRate_{48000.0};
     std::vector<State> states_;
+};
+
+class Lowpass final : public runtime::DspNode {
+public:
+    void bind(const NodeBinding& binding) override { filter_.bind(binding); }
+    void reset() override { filter_.reset(); }
+    void process(std::uint32_t voice, std::uint32_t frames) override { filter_.process(voice, frames, false); }
+
+private:
+    SvfFilter filter_;
+};
+
+class Highpass final : public runtime::DspNode {
+public:
+    void bind(const NodeBinding& binding) override { filter_.bind(binding); }
+    void reset() override { filter_.reset(); }
+    void process(std::uint32_t voice, std::uint32_t frames) override { filter_.process(voice, frames, true); }
+
+private:
+    SvfFilter filter_;
 };
 
 class FeedbackDelay final : public runtime::DspNode {
@@ -518,9 +578,9 @@ public:
     bool contains(const model::NodeTypeId& typeId) const override {
         const auto& id = typeId.value;
         return id == "nod.midi-input" || id == "nod.note-to-frequency" || id == "nod.oscillator" || id == "nod.adsr" ||
-               id == "nod.gain" || id == "nod.lowpass" || id == "nod.feedback-delay" || id == "nod.add" ||
-               id == "nod.multiply" || id == "nod.scale-bias" || id == "nod.mix" || id == "nod.voice-mix" ||
-               id == "nod.audio-output";
+               id == "nod.gain" || id == "nod.noise" || id == "nod.lowpass" || id == "nod.highpass" ||
+               id == "nod.feedback-delay" || id == "nod.add" || id == "nod.multiply" || id == "nod.scale-bias" ||
+               id == "nod.mix" || id == "nod.voice-mix" || id == "nod.audio-output";
     }
     std::uint64_t stateBytes(
         const model::NodeTypeId& typeId, double sampleRate, std::uint32_t maxFrames, std::uint32_t voices) const override {
@@ -533,7 +593,9 @@ public:
         if (id == "nod.oscillator") return std::make_unique<Oscillator>();
         if (id == "nod.adsr") return std::make_unique<Adsr>();
         if (id == "nod.gain") return std::make_unique<Gain>();
+        if (id == "nod.noise") return std::make_unique<Noise>();
         if (id == "nod.lowpass") return std::make_unique<Lowpass>();
+        if (id == "nod.highpass") return std::make_unique<Highpass>();
         if (id == "nod.feedback-delay") return std::make_unique<FeedbackDelay>();
         if (id == "nod.add") return std::make_unique<Add>();
         if (id == "nod.multiply") return std::make_unique<Multiply>();

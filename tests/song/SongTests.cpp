@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <nodsynth/runtime/WavFile.h>
 #include <nodsynth/song/AudioAnalysis.h>
 #include <nodsynth/song/ModelClient.h>
+#include <nodsynth/song/Presets.h>
 #include <nodsynth/song/Process.h>
 #include <nodsynth/song/SongDocument.h>
 #include <nodsynth/song/SongRenderer.h>
@@ -182,6 +184,7 @@ TEST_CASE("song save, MIDI export, and command revision stay stable", "[song]") 
     std::vector<std::uint8_t> pitches;
     for (const auto& track : again.song.tracks) pitches.push_back(track.clips.front().notes.front().pitch);
     REQUIRE(pitches == std::vector<std::uint8_t>{60, 64, 67});
+    loaded->tracks[0].clips[0].length = 1920;
 
     persist::Json batch = persist::Json::object();
     batch.set("schemaVersion", persist::Json::number(1));
@@ -529,6 +532,21 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     const auto preview = song::renderSong(*loaded, options, root / "preview.wav", root / "preview-stems");
     REQUIRE(preview.ok);
     REQUIRE(preview.revision == 2);
+    REQUIRE(preview.quality == "final");
+    REQUIRE(preview.auditionStatus == "unheard");
+    REQUIRE_FALSE(preview.cacheHit);
+    REQUIRE(preview.cacheReason == "cache-not-implemented");
+    REQUIRE_FALSE(preview.renderId.empty());
+    REQUIRE(preview.timing.analyzeMs == 0);
+    REQUIRE(preview.timing.totalMs > 0);
+    REQUIRE(preview.timing.prepareMs >= 0);
+    REQUIRE(preview.timing.prerollMs > 0);
+    REQUIRE(preview.timing.emittedFrames == preview.frames);
+    REQUIRE(preview.timing.renderedFrames >= preview.timing.emittedFrames);
+    REQUIRE(preview.timing.realtimeFactor > 0);
+    const auto previewJson = song::songReportJson(preview);
+    REQUIRE(previewJson.find("timing") != nullptr);
+    REQUIRE(previewJson.find("timing")->find("prerollMs")->asNumber() > 0);
     const auto origin = song::sampleAtTick(*loaded, 7200, 48000);
     REQUIRE(origin.has_value());
     REQUIRE(preview.originSample == static_cast<std::uint64_t>(*origin));
@@ -578,6 +596,59 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     REQUIRE(silent.peak == 0.f);
     REQUIRE(silent.silentFrames == silence.interleaved.size() / silence.channels);
     REQUIRE_FALSE(silent.loudnessLufs.has_value());
+    REQUIRE(silent.fullySilent);
+    REQUIRE_FALSE(silent.activityStartSeconds.has_value());
+    REQUIRE_FALSE(silent.activityEndSeconds.has_value());
+    REQUIRE(silent.leadingSilenceSeconds == 0.0);
+    REQUIRE(silent.trailingSilenceSeconds == 0.0);
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("windowed silence ignores a start impulse and measures leading rest", "[song][analysis]") {
+    using Catch::Approx;
+    const auto root = tempPath("nodsynth-audio-analysis");
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::string error;
+
+    runtime::WavData impulse;
+    impulse.sampleRate = 48000;
+    impulse.channels = 2;
+    impulse.interleaved.assign(48000 * 2, 0.f);
+    impulse.interleaved[0] = 1.f;
+    impulse.interleaved[1] = 1.f;
+    const auto impulsePath = root / "impulse.wav";
+    REQUIRE(runtime::writeWav(impulsePath, impulse, error));
+    const auto impulseAnalysis = song::analyzeWav(impulsePath);
+    REQUIRE(impulseAnalysis.ok);
+    REQUIRE(impulseAnalysis.leadingSilenceSeconds == Approx(0.0).margin(1.0e-9));
+    REQUIRE(impulseAnalysis.activityStartSeconds.has_value());
+    REQUIRE(*impulseAnalysis.activityStartSeconds == Approx(0.0).margin(0.01));
+    REQUIRE_FALSE(impulseAnalysis.fullySilent);
+    REQUIRE(impulseAnalysis.samplePeakDb.has_value());
+    REQUIRE(*impulseAnalysis.samplePeakDb == Approx(0.0).margin(0.01));
+
+    runtime::WavData delayed;
+    delayed.sampleRate = 48000;
+    delayed.channels = 1;
+    delayed.interleaved.assign(48000, 0.f);
+    for (std::size_t frame = 24000; frame < delayed.interleaved.size(); ++frame) delayed.interleaved[frame] = 0.5f;
+    const auto delayedPath = root / "delayed.wav";
+    REQUIRE(runtime::writeWav(delayedPath, delayed, error));
+    song::AnalyzeOptions options;
+    const auto delayedAnalysis = song::analyzeWav(delayedPath, options);
+    REQUIRE(delayedAnalysis.ok);
+    REQUIRE(delayedAnalysis.leadingSilenceSeconds == Approx(0.5).margin(0.01));
+    REQUIRE(delayedAnalysis.activityStartSeconds.has_value());
+    REQUIRE(*delayedAnalysis.activityStartSeconds == Approx(0.5).margin(0.01));
+    REQUIRE_FALSE(delayedAnalysis.fullySilent);
+    REQUIRE(delayedAnalysis.windowSeconds == Approx(0.01).margin(1.0e-9));
+    REQUIRE(delayedAnalysis.thresholdAmplitude == Approx(0.001).margin(1.0e-6));
+    REQUIRE(delayedAnalysis.rms > 0.0);
+    const auto json = song::analysisJson(delayedAnalysis);
+    REQUIRE(json.find("leadingSilenceSeconds")->asNumber() == Approx(0.5).margin(0.01));
+    REQUIRE(json.find("leadingSilence") != nullptr);
+
     std::filesystem::remove_all(root);
 }
 
@@ -856,4 +927,144 @@ TEST_CASE("a model adapter proposes an edit without changing the song until it i
     }
     REQUIRE(proposedText.find("move-note") != std::string::npos);
     std::filesystem::remove_all(root);
+}
+
+TEST_CASE("preset catalog lists roles and can bind and audition a kick", "[song][preset]") {
+    const std::filesystem::path presetsRoot = NOD_PRESETS_ROOT;
+    const auto listed = song::listPresets(presetsRoot);
+    REQUIRE(listed.size() == 7);
+    REQUIRE(song::findPreset(presetsRoot, "kick"));
+    REQUIRE(song::findPreset(presetsRoot, "snare-clap")->role == "clap");
+    REQUIRE(song::listPresets(presetsRoot, "hat").size() == 2);
+    const auto json = song::listJson(listed);
+    REQUIRE(json.find("count")->asNumber() == 7);
+
+    song::SongDocument song;
+    song.ppq = 480;
+    song.tempo = {{0, 500000}};
+    song.timeSignatures = {{0, 4, 4}};
+    song::Track track;
+    track.id = "kick";
+    track.name = "kick";
+    song::Clip clip;
+    clip.id = "kick-clip";
+    song::Note note;
+    note.id = "kick-1";
+    note.tick = 0;
+    note.duration = 240;
+    note.pitch = 36;
+    note.velocity = 110;
+    clip.notes.push_back(note);
+    track.clips.push_back(std::move(clip));
+    song.tracks.push_back(std::move(track));
+    std::string error;
+    REQUIRE(song::bindPreset(song, "kick", "kick", presetsRoot, error));
+    REQUIRE(song.resources.front().path == "presets/kick.json");
+    REQUIRE_FALSE(song.resources.front().hash.empty());
+
+    const auto wavPath = tempPath("nodsynth-preset-kick.wav");
+    std::filesystem::remove(wavPath);
+    song::PresetAuditionOptions options;
+    options.presetsRoot = presetsRoot;
+    options.pitch = 36;
+    options.noteSeconds = 0.08;
+    options.tailSeconds = 0.25;
+    const auto report = song::renderPresetAudition("kick", wavPath, options);
+    REQUIRE(report.ok);
+    REQUIRE(report.peak > 0.01f);
+    runtime::WavData wav;
+    REQUIRE(runtime::readWav(wavPath, wav, error));
+    REQUIRE(rms(wav, 0, 4000) > 0.001);
+    std::filesystem::remove(wavPath);
+}
+
+TEST_CASE("create song, name tracks, and mix edits produce a semantic diff", "[song]") {
+    auto song = song::createSong({128.0, 4, 4, 480, 16});
+    REQUIRE(song.songRangeEndTick == 16 * 1920);
+    persist::Json batch = persist::Json::object();
+    batch.set("schemaVersion", persist::Json::number(1));
+    persist::Json commands = persist::Json::array();
+    for (const char* name : {"kick", "hat", "clap", "bass", "lead", "pad"}) {
+        persist::Json create = persist::Json::object();
+        create.set("op", persist::Json::string("create-track"));
+        create.set("id", persist::Json::string(name));
+        create.set("name", persist::Json::string(name));
+        commands.push(std::move(create));
+        persist::Json clip = persist::Json::object();
+        clip.set("op", persist::Json::string("create-clip"));
+        clip.set("track", persist::Json::string(name));
+        clip.set("id", persist::Json::string(std::string(name) + "-clip"));
+        clip.set("startTick", persist::Json::number(0));
+        clip.set("length", persist::Json::number(16 * 1920));
+        commands.push(std::move(clip));
+    }
+    batch.set("commands", std::move(commands));
+    const auto created = song::applyCommands(song, batch, song.revision);
+    REQUIRE(created.ok);
+    REQUIRE(song.tracks.size() == 6);
+    REQUIRE(song.tracks[0].name == "kick");
+
+    persist::Json mix = persist::Json::object();
+    mix.set("schemaVersion", persist::Json::number(1));
+    persist::Json mixCommands = persist::Json::array();
+    persist::Json gain = persist::Json::object();
+    gain.set("op", persist::Json::string("set-gain"));
+    gain.set("track", persist::Json::string("lead"));
+    gain.set("gain", persist::Json::number(0.5));
+    mixCommands.push(std::move(gain));
+    persist::Json pan = persist::Json::object();
+    pan.set("op", persist::Json::string("set-pan"));
+    pan.set("track", persist::Json::string("hat"));
+    pan.set("pan", persist::Json::number(0.25));
+    mixCommands.push(std::move(pan));
+    mix.set("commands", std::move(mixCommands));
+    const auto mixed = song::applyCommands(song, mix, song.revision);
+    REQUIRE(mixed.ok);
+    REQUIRE(mixed.diff.find("changedEntityCount")->asNumber() >= 2);
+    bool sawGain = false;
+    for (const auto& change : mixed.diff.find("changes")->asArray()) {
+        if (change.find("field")->asString() == "gain") sawGain = true;
+    }
+    REQUIRE(sawGain);
+    const auto undone = song::undoSong(song);
+    REQUIRE(undone.ok);
+    REQUIRE(song.tracks[4].gain == 1.0);
+
+    song::QueryOptions summary;
+    summary.view = "summary";
+    const auto summaryJson = song::querySong(song, summary);
+    REQUIRE(summaryJson.find("summary") != nullptr);
+    REQUIRE(summaryJson.find("notes") == nullptr);
+    REQUIRE(summaryJson.dump().size() < 8 * 1024);
+
+    song::QueryOptions tracks;
+    tracks.view = "tracks";
+    const auto trackJson = song::querySong(song, tracks);
+    REQUIRE(trackJson.find("tracks")->asArray().size() == 6);
+
+    std::uint32_t from = 0;
+    std::uint32_t to = 0;
+    std::string error;
+    REQUIRE(song::barsToTicks(song, 9, 13, from, to, error));
+    REQUIRE(from == 8 * 1920);
+    REQUIRE(to == 12 * 1920);
+}
+
+TEST_CASE("MIDI import sorts by source track not first onset", "[song]") {
+    SmfBuilder builder;
+    builder.tracks.resize(3);
+    builder.event(1, 0, {0xff, 0x03, 0x04, 'k', 'i', 'c', 'k'});
+    builder.event(1, 480, {0x90, 60, 100});
+    builder.setEnd(1, 240);
+    builder.event(2, 0, {0x90, 72, 90});
+    builder.setEnd(2, 240);
+    const auto bytes = builder.build();
+    const auto parsed = midi::parse(bytes.data(), bytes.size());
+    REQUIRE(parsed.status == midi::ParseStatus::ok);
+    const auto imported = song::importMidi(parsed.file);
+    REQUIRE(imported.ok);
+    REQUIRE(imported.song.tracks.size() == 2);
+    REQUIRE(imported.song.tracks[0].sourceTrack == 1);
+    REQUIRE(imported.song.tracks[0].name == "kick");
+    REQUIRE(imported.song.tracks[1].sourceTrack == 2);
 }

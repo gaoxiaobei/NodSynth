@@ -134,6 +134,15 @@ ImportResult importMidi(const midi::File& file, const ImportOptions& options) {
         if (streamFor(event.track, event.channel) != nullptr) continue;
         streams.push_back({event.track, event.channel, {}, {}});
     }
+    std::stable_sort(streams.begin(), streams.end(), [](const Stream& left, const Stream& right) {
+        if (left.track != right.track) return left.track < right.track;
+        return left.channel < right.channel;
+    });
+    std::vector<std::string> trackNames(file.trackCount);
+    for (const auto& event : events) {
+        if (event.kind != midi::EventKind::meta || event.metaType != 0x03 || event.track >= trackNames.size()) continue;
+        if (trackNames[event.track].empty()) trackNames[event.track] = std::string(event.payload.begin(), event.payload.end());
+    }
     std::vector<std::vector<OpenNote>> open(streams.size());
     int noteCounter = 0;
     int performanceCounter = 0;
@@ -259,12 +268,16 @@ ImportResult importMidi(const midi::File& file, const ImportOptions& options) {
     for (const auto& stream : streams) {
         Track track;
         track.id = nextId(trackCounter, "track");
-        track.name = "Track " + std::to_string(stream.track) + " ch " + std::to_string(stream.channel);
+        if (stream.track < trackNames.size() && !trackNames[stream.track].empty()) track.name = trackNames[stream.track];
+        else track.name = "Track " + std::to_string(stream.track) + " ch " + std::to_string(stream.channel);
+        track.order = static_cast<int>(song.tracks.size());
         track.sourceTrack = stream.track;
         track.sourceChannel = stream.channel;
         Clip clip;
         clip.id = nextId(clipCounter, "clip");
         clip.notes = stream.notes;
+        for (const auto& note : clip.notes) clip.length = std::max(clip.length, note.tick + note.duration);
+        clip.length = std::max(clip.length, file.endTick);
         track.clips.push_back(std::move(clip));
         track.performance = stream.performance;
         const auto map = std::find_if(options.maps.begin(), options.maps.end(), [&](const StreamMap& candidate) {
@@ -426,12 +439,14 @@ std::optional<std::int64_t> sampleAtTick(const SongDocument& song, std::uint32_t
 
 std::uint32_t endTick(const SongDocument& song) {
     std::uint64_t end = 0;
+    if (song.songRangeEndTick) end = *song.songRangeEndTick;
     for (const auto& point : song.tempo) end = std::max<std::uint64_t>(end, point.tick);
     for (const auto& point : song.timeSignatures) end = std::max<std::uint64_t>(end, point.tick);
     for (const auto& event : song.preserved) end = std::max<std::uint64_t>(end, event.tick);
     for (const auto& track : song.tracks) {
         for (const auto& event : track.performance) end = std::max<std::uint64_t>(end, event.tick);
         for (const auto& clip : track.clips) {
+            end = std::max(end, static_cast<std::uint64_t>(clip.startTick) + clip.length);
             for (const auto& note : clip.notes) {
                 end = std::max(end, static_cast<std::uint64_t>(clip.startTick) + note.tick + note.duration);
             }

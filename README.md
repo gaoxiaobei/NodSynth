@@ -10,6 +10,7 @@ NodSynth 是一个开发中的节点式复音软件合成器。用户在画布�
 
 - [产品目标与架构](docs/PROJECT.md)：产品边界、核心原则和当前实现。
 - [开发路线与近期计划](docs/ROADMAP.md)：里程碑、交付物和验收条件。
+- [编曲工作台迭代](docs/ITERATION-COMPOSING.md)：依据 Agent 实际编曲体验，改善原生创作、编辑反馈、音色和试听效率。
 - [后 MVP 设计](docs/COMPOSITION-SUITE.md)：歌曲工程、命令行/AI 接口、多合成器渲染及插件路线。
 
 ## 当前能力
