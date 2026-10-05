@@ -1,3 +1,4 @@
 .superpowers/
 /build/
 /compile_commands.json
+/third_party/vst3sdk/

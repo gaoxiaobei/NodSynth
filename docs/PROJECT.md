@@ -64,7 +64,7 @@ C++20 核心不依赖 JUCE。这台机器没有 MSVC，Windows 外壳使用 WASA
 
 2026-10-04 在本机验证的能力见 [MVP 历史记录](history/MVP-2026-10-04.md)。图编辑、编译、运行时、工程文件和 Windows 应用都有对应代码与测试；本次设计未重跑历史验收。
 
-- `nod_render` 保留正弦演示和 soak。`--midi` 读取 SMF type 0/1，可加载已保存音色，流式写出 WAV、尾音和 JSON 报告。仍然缺少歌曲模型、多实例混音与外部合成器适配。
+- `nod_render` 保留正弦演示和 soak。`--midi` 读取 SMF type 0/1，可加载已保存音色，流式写出 WAV、尾音和 JSON 报告。`nod song` / `nod render` 已支持 Song v1、显式乐器映射、多 NodSynth 实例，以及通过 FluidSynth 播放 SoundFont 的联合离线渲染。NodSynth VST3 可在 REAPER 中加载，套件宿主可离线渲染第三方插件。`nod_daw` 提供钢琴卷帘、混音条和播放。录音、音频片段、时间伸缩和侧链仍排在后面。
 
 - `GraphEditor::connect` 仍只拒绝重复连接和已被占用的输入。类型、声道和作用域错误由编译预检与异步编译诊断给出，非法结构不会替换正在发声的计划。
 - Gate/Note 在编译结果里仍占 slot 0；运行时自己分配采样精确的 note、gate、velocity 缓冲。

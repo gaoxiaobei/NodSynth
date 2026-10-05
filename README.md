@@ -4,7 +4,7 @@ NodSynth 是一个开发中的节点式复音软件合成器。用户在画布�
 
 **当前阶段：Windows 上可以打开默认音色、演奏、编辑节点并保存工程。** 核心仍是不依赖界面的 C++20 库，可在无音频设备时离线渲染 WAV。
 
-后续同时发展独立合成器和 AI 编曲套件。命令行已经能把一份 MIDI 和已保存音色渲染成 WAV；多轨歌曲、外部合成器和 DAW 界面还在后面。
+后续同时发展独立合成器和 AI 编曲套件。`nod_render --midi` 渲染单音色。`nod song` / `nod render` 导入多轨 MIDI，按显式映射用多个 NodSynth 实例或 FluidSynth 输出混音和分轨。NodSynth 可作为 VST3 乐器加载，套件也能离线托管第三方 VST3。Windows 上的 `nod_daw` 提供钢琴卷帘、混音条和播放。
 
 ## 项目文档
 
