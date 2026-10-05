@@ -1068,3 +1068,66 @@ TEST_CASE("MIDI import sorts by source track not first onset", "[song]") {
     REQUIRE(imported.song.tracks[0].name == "kick");
     REQUIRE(imported.song.tracks[1].sourceTrack == 2);
 }
+
+TEST_CASE("dry track cache remixes after gain and pan edits", "[song]") {
+    const auto root = tempPath("nodsynth-dry-cache");
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto patch = root / "sine.json";
+    savePatch(patch, nodes::sinePatch());
+
+    song::SongDocument song;
+    song.ppq = 480;
+    song.tempo = {{0, 500000}};
+    song.timeSignatures = {{0, 4, 4}};
+    song.songRangeEndTick = 1920;
+    song::Track track;
+    track.id = "lead";
+    track.name = "lead";
+    song::Clip clip;
+    clip.id = "clip";
+    clip.length = 1920;
+    clip.notes.push_back({"n1", 0, 960, 60, 100, 0});
+    track.clips.push_back(std::move(clip));
+    song.tracks.push_back(std::move(track));
+    std::string error;
+    REQUIRE(song::bindPatch(song, "lead", patch.string(), patch, error));
+
+    song::SongRenderOptions options;
+    options.tailSeconds = 0.05;
+    options.blockSize = 128;
+    options.baseDirectory = root;
+    options.cacheDirectory = root / "cache";
+    const auto cold = song::renderSong(song, options, root / "cold.wav");
+    REQUIRE(cold.ok);
+    REQUIRE_FALSE(cold.cacheHit);
+    REQUIRE(cold.cacheReason.find("dry") != std::string::npos);
+
+    persist::Json batch = persist::Json::object();
+    batch.set("schemaVersion", persist::Json::number(1));
+    persist::Json commands = persist::Json::array();
+    persist::Json gain = persist::Json::object();
+    gain.set("op", persist::Json::string("set-gain"));
+    gain.set("track", persist::Json::string("lead"));
+    gain.set("gain", persist::Json::number(0.25));
+    commands.push(std::move(gain));
+    persist::Json pan = persist::Json::object();
+    pan.set("op", persist::Json::string("set-pan"));
+    pan.set("track", persist::Json::string("lead"));
+    pan.set("pan", persist::Json::number(-0.5));
+    commands.push(std::move(pan));
+    batch.set("commands", std::move(commands));
+    REQUIRE(song::applyCommands(song, batch, song.revision).ok);
+
+    const auto warm = song::renderSong(song, options, root / "warm.wav");
+    REQUIRE(warm.ok);
+    REQUIRE(warm.cacheHit);
+    REQUIRE(warm.cacheReason == "remix-dry-tracks");
+    REQUIRE(warm.milliseconds < cold.milliseconds);
+    REQUIRE(warm.peak < cold.peak);
+
+    const auto compared = song::compareWav(root / "cold.wav", root / "warm.wav");
+    REQUIRE(compared.ok);
+    REQUIRE(compared.peakDelta < 0);
+    std::filesystem::remove_all(root);
+}

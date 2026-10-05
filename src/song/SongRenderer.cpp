@@ -207,6 +207,9 @@ struct TrackVoice {
     std::uint64_t hash{14695981039346656037ull};
     std::unique_ptr<runtime::WavStream> stem;
     std::filesystem::path stemPath;
+    std::unique_ptr<runtime::WavStream> dry;
+    std::filesystem::path dryFile;
+    std::string soundKey;
 };
 
 std::uint64_t mixHash(std::uint64_t hash, const float* samples, std::size_t count) {
@@ -229,12 +232,22 @@ std::string hex64(std::uint64_t value) {
     return text;
 }
 
-std::string fingerprint(const SongDocument& song, const SongRenderOptions& options, bool includeMix) {
+std::string hashText(const std::string& text) {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : text) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    return hex64(hash);
+}
+
+persist::Json sharedRenderJson(const SongDocument& song, const SongRenderOptions& options) {
     persist::Json json = persist::Json::object();
     json.set("ppq", persist::Json::number(song.ppq));
     json.set("sampleRate", persist::Json::number(options.sampleRate));
     json.set("blockSize", persist::Json::number(options.blockSize));
     json.set("tailSeconds", persist::Json::number(options.tailSeconds));
+    json.set("quality", persist::Json::string(options.quality.empty() ? "final" : options.quality));
     json.set("endTick", persist::Json::number(endTick(song)));
     persist::Json tempo = persist::Json::array();
     for (const auto& point : song.tempo) {
@@ -244,11 +257,79 @@ std::string fingerprint(const SongDocument& song, const SongRenderOptions& optio
         tempo.push(std::move(item));
     }
     json.set("tempo", std::move(tempo));
+    persist::Json signatures = persist::Json::array();
+    for (const auto& point : song.timeSignatures) {
+        persist::Json item = persist::Json::object();
+        item.set("tick", persist::Json::number(point.tick));
+        item.set("n", persist::Json::number(point.numerator));
+        item.set("d", persist::Json::number(point.denominator));
+        signatures.push(std::move(item));
+    }
+    json.set("timeSignatures", std::move(signatures));
+    return json;
+}
+
+std::string trackSoundKey(const SongDocument& song, const Track& track, const SongRenderOptions& options) {
+    persist::Json json = sharedRenderJson(song, options);
+    json.set("track", persist::Json::string(track.id));
+    json.set("instrument", persist::Json::string(track.instrumentId));
+    persist::Json notes = persist::Json::array();
+    for (const auto& clip : track.clips) {
+        for (const auto& note : clip.notes) {
+            persist::Json noteJson = persist::Json::object();
+            noteJson.set("t", persist::Json::number(static_cast<double>(clip.startTick) + note.tick));
+            noteJson.set("d", persist::Json::number(note.duration));
+            noteJson.set("p", persist::Json::number(note.pitch));
+            noteJson.set("v", persist::Json::number(note.velocity));
+            noteJson.set("c", persist::Json::number(note.channel));
+            notes.push(std::move(noteJson));
+        }
+    }
+    json.set("notes", std::move(notes));
+    persist::Json performance = persist::Json::array();
+    for (const auto& event : track.performance) {
+        persist::Json item = persist::Json::object();
+        item.set("t", persist::Json::number(event.tick));
+        item.set("k", persist::Json::number(static_cast<double>(event.kind)));
+        item.set("d1", persist::Json::number(event.data1));
+        item.set("d2", persist::Json::number(event.data2));
+        performance.push(std::move(item));
+    }
+    json.set("performance", std::move(performance));
+    persist::Json parameters = persist::Json::array();
+    for (const auto& lane : track.parameterAutomation) {
+        persist::Json laneJson = persist::Json::object();
+        laneJson.set("id", persist::Json::string(lane.id));
+        persist::Json points = persist::Json::array();
+        for (const auto& point : lane.points) {
+            persist::Json pointJson = persist::Json::object();
+            pointJson.set("t", persist::Json::number(point.tick));
+            pointJson.set("v", persist::Json::number(point.value));
+            points.push(std::move(pointJson));
+        }
+        laneJson.set("points", std::move(points));
+        parameters.push(std::move(laneJson));
+    }
+    json.set("parameterAutomation", std::move(parameters));
+    for (const auto& instrument : song.instruments) {
+        if (instrument.id != track.instrumentId) continue;
+        json.set("kind", persist::Json::string(instrument.kind == InstrumentKind::nodsynth ? "nodsynth" : instrument.adapter));
+        for (const auto& resource : song.resources) {
+            if (resource.id != instrument.resourceId) continue;
+            json.set("resourceHash", persist::Json::string(resource.hash));
+            json.set("resourcePath", persist::Json::string(resource.path));
+        }
+    }
+    return hashText(json.dump(-1));
+}
+
+std::string fingerprint(const SongDocument& song, const SongRenderOptions& options, bool includeMix) {
+    persist::Json json = sharedRenderJson(song, options);
     persist::Json tracks = persist::Json::array();
     for (const auto& track : song.tracks) {
         persist::Json item = persist::Json::object();
         item.set("id", persist::Json::string(track.id));
-        item.set("instrument", persist::Json::string(track.instrumentId));
+        item.set("sound", persist::Json::string(trackSoundKey(song, track, options)));
         if (includeMix) {
             item.set("gain", persist::Json::number(track.gain));
             item.set("pan", persist::Json::number(track.pan));
@@ -261,37 +342,26 @@ std::string fingerprint(const SongDocument& song, const SongRenderOptions& optio
             }
             item.set("gainAutomation", std::move(automation));
         }
-        persist::Json notes = persist::Json::array();
-        for (const auto& clip : track.clips) {
-            for (const auto& note : clip.notes) {
-                persist::Json noteJson = persist::Json::object();
-                noteJson.set("t", persist::Json::number(static_cast<double>(clip.startTick) + note.tick));
-                noteJson.set("d", persist::Json::number(note.duration));
-                noteJson.set("p", persist::Json::number(note.pitch));
-                noteJson.set("v", persist::Json::number(note.velocity));
-                notes.push(std::move(noteJson));
-            }
-        }
-        item.set("notes", std::move(notes));
         tracks.push(std::move(item));
     }
     json.set("tracks", std::move(tracks));
-    persist::Json resources = persist::Json::array();
-    for (const auto& resource : song.resources) {
-        persist::Json item = persist::Json::object();
-        item.set("id", persist::Json::string(resource.id));
-        item.set("hash", persist::Json::string(resource.hash));
-        item.set("path", persist::Json::string(resource.path));
-        resources.push(std::move(item));
+    return hashText(json.dump(-1));
+}
+
+std::filesystem::path dryPath(const std::filesystem::path& cacheDir, const std::string& key) {
+    return cacheDir / "dry" / (key + ".wav");
+}
+
+bool trackHasMusic(const Track& track) {
+    if (!track.performance.empty()) return true;
+    return std::any_of(track.clips.begin(), track.clips.end(), [](const Clip& clip) { return !clip.notes.empty(); });
+}
+
+const Instrument* findInstrument(const SongDocument& song, const std::string& id) {
+    for (const auto& instrument : song.instruments) {
+        if (instrument.id == id) return &instrument;
     }
-    json.set("resources", std::move(resources));
-    const auto text = json.dump(-1);
-    std::uint64_t hash = 14695981039346656037ull;
-    for (unsigned char byte : text) {
-        hash ^= byte;
-        hash *= 1099511628211ull;
-    }
-    return hex64(hash);
+    return nullptr;
 }
 } // namespace
 
@@ -329,6 +399,9 @@ persist::Json songReportJson(const SongRenderReport& report) {
     json.set("quality", persist::Json::string(report.quality));
     json.set("renderId", persist::Json::string(report.renderId));
     json.set("auditionStatus", persist::Json::string(report.auditionStatus));
+    json.set("mixPath", persist::Json::string(report.mixPath));
+    if (report.previewStartTick) json.set("previewStartTick", persist::Json::number(*report.previewStartTick));
+    if (report.previewEndTick) json.set("previewEndTick", persist::Json::number(*report.previewEndTick));
     json.set("latencySamples", persist::Json::number(0));
     persist::Json stems = persist::Json::array();
     for (const auto& stem : report.stems) {
@@ -398,6 +471,10 @@ SongRenderReport renderSong(
         if (report.cacheReason.empty()) report.cacheReason = "cache-not-implemented";
         if (report.quality.empty()) report.quality = "final";
         if (report.auditionStatus.empty()) report.auditionStatus = "unheard";
+        if (report.quality.empty()) report.quality = options.quality.empty() ? "final" : options.quality;
+        if (report.mixPath.empty()) report.mixPath = mixOutput.string();
+        report.previewStartTick = options.previewStartTick;
+        report.previewEndTick = options.previewEndTick;
         if (report.renderId.empty()) {
             report.renderId = hex64(static_cast<std::uint64_t>(now().time_since_epoch().count()));
             if (!report.mixHash.empty()) report.renderId += report.mixHash;
@@ -438,22 +515,15 @@ SongRenderReport renderSong(
         const auto endSampleTick = sampleAtTick(song, *options.previewEndTick, rate);
         if (!startSample || !endSampleTick) return finish(fail("sample-overflow", "preview time does not fit in a sample index"));
         const auto tailBudget = static_cast<std::uint64_t>(std::llround(options.tailSeconds * options.sampleRate));
-        runtime::WavData wav;
+        const auto emitFrom = static_cast<std::uint64_t>(*startSample);
+        const auto wantedUntil = static_cast<std::uint64_t>(*endSampleTick) + tailBudget;
+        if (wantedUntil < emitFrom) return finish(fail("invalid-options", "preview range is empty"));
+        runtime::WavData sliced;
         std::string wavError;
-        if (!runtime::readWav(cachedMix, wav, wavError) || wav.channels != 2 || wav.sampleRate != rate) {
+        if (!runtime::readWavRange(cachedMix, sliced, emitFrom, wantedUntil - emitFrom, wavError) || sliced.channels != 2 ||
+            sliced.sampleRate != rate) {
             return finish(fail("cache-invalid", wavError.empty() ? "cached mix is unusable" : wavError));
         }
-        const auto emitFrom = static_cast<std::uint64_t>(*startSample);
-        const auto emitUntil = std::min<std::uint64_t>(
-            static_cast<std::uint64_t>(*endSampleTick) + tailBudget, wav.interleaved.size() / 2);
-        if (emitUntil < emitFrom) return finish(fail("invalid-options", "preview range is empty"));
-        runtime::WavData sliced;
-        sliced.sampleRate = rate;
-        sliced.channels = 2;
-        const auto begin = static_cast<std::size_t>(emitFrom) * 2;
-        const auto count = static_cast<std::size_t>(emitUntil - emitFrom) * 2;
-        sliced.interleaved.assign(wav.interleaved.begin() + static_cast<std::ptrdiff_t>(begin),
-            wav.interleaved.begin() + static_cast<std::ptrdiff_t>(begin + count));
         if (!runtime::writeWav(mixOutput, sliced, wavError)) return finish(fail("output-io", wavError));
         SongRenderReport report;
         report.ok = true;
@@ -468,6 +538,213 @@ SongRenderReport renderSong(
         report.peak = peak;
         report.mixHash = mixKey;
         return finish(std::move(report));
+    }
+
+    if (options.useCache && (options.quality.empty() || options.quality == "final")) {
+        struct CachedTrack {
+            const Track* track{nullptr};
+            std::filesystem::path dry;
+            bool external{false};
+        };
+        std::vector<CachedTrack> cached;
+        bool remixable = true;
+        for (const auto& track : song.tracks) {
+            if (!trackHasMusic(track) && track.instrumentId.empty()) continue;
+            const auto* instrument = findInstrument(song, track.instrumentId);
+            if (instrument == nullptr) {
+                remixable = false;
+                break;
+            }
+            CachedTrack item;
+            item.track = &track;
+            if (instrument->kind == InstrumentKind::nodsynth) {
+                item.dry = dryPath(cacheDir, trackSoundKey(song, track, options));
+                if (!std::filesystem::exists(item.dry)) {
+                    remixable = false;
+                    break;
+                }
+            } else {
+                item.external = true;
+                if (!options.freezeExternal) {
+                    remixable = false;
+                    break;
+                }
+                item.dry = dryPath(cacheDir, trackSoundKey(song, track, options));
+                if (!std::filesystem::exists(item.dry)) {
+                    remixable = false;
+                    break;
+                }
+            }
+            cached.push_back(std::move(item));
+        }
+        if (remixable && !cached.empty()) {
+            std::uint64_t emitFrom = 0;
+            std::uint64_t emitUntil = ~std::uint64_t{0};
+            const auto tailBudget = static_cast<std::uint64_t>(std::llround(options.tailSeconds * options.sampleRate));
+            if (preview) {
+                if (!options.previewStartTick || !options.previewEndTick || *options.previewEndTick < *options.previewStartTick) {
+                    return finish(fail("invalid-options", "preview requires a start tick and an end tick"));
+                }
+                const auto startSample = sampleAtTick(song, *options.previewStartTick, rate);
+                const auto endSampleTick = sampleAtTick(song, *options.previewEndTick, rate);
+                if (!startSample || !endSampleTick) return finish(fail("sample-overflow", "preview time does not fit in a sample index"));
+                emitFrom = static_cast<std::uint64_t>(*startSample);
+                emitUntil = static_cast<std::uint64_t>(*endSampleTick) + tailBudget;
+            }
+            struct RemixTrack {
+                const CachedTrack* item{nullptr};
+                runtime::WavData dry;
+                std::vector<GainSample> automation;
+                float constantGain{1.f};
+                double pan{0.0};
+            };
+            std::vector<RemixTrack> remixTracks;
+            remixTracks.reserve(cached.size());
+            std::uint64_t frames = 0;
+            bool dryReady = true;
+            for (const auto& item : cached) {
+                RemixTrack remix;
+                remix.item = &item;
+                remix.constantGain = static_cast<float>(item.track->gain);
+                remix.pan = item.track->pan;
+                for (const auto& point : item.track->gainAutomation) {
+                    const auto sample = sampleAtTick(song, point.tick, rate);
+                    if (!sample) return finish(fail("sample-overflow", "automation time does not fit in a sample index"));
+                    remix.automation.push_back({*sample, static_cast<float>(point.gain)});
+                }
+                std::stable_sort(remix.automation.begin(), remix.automation.end(), [](const GainSample& left, const GainSample& right) {
+                    return left.sample < right.sample;
+                });
+                std::string wavError;
+                runtime::WavData header;
+                std::uint32_t dataBytes = 0;
+                {
+                    std::ifstream probe(item.dry, std::ios::binary);
+                    if (!probe || !runtime::readWavHeader(probe, header, dataBytes, wavError) || header.channels != 2 ||
+                        header.sampleRate != rate) {
+                        dryReady = false;
+                        break;
+                    }
+                }
+                const auto totalFrames = static_cast<std::uint64_t>(dataBytes / sizeof(float) / 2);
+                frames = std::max(frames, totalFrames);
+                remixTracks.push_back(std::move(remix));
+            }
+            if (dryReady && !remixTracks.empty()) {
+                if (!preview) emitUntil = frames;
+                else emitUntil = std::min(emitUntil, frames);
+                if (emitUntil < emitFrom) return finish(fail("invalid-options", "preview range is empty"));
+                const auto needed = emitUntil - emitFrom;
+                for (auto& remix : remixTracks) {
+                    std::string wavError;
+                    if (!runtime::readWavRange(remix.item->dry, remix.dry, emitFrom, needed, wavError) || remix.dry.channels != 2 ||
+                        remix.dry.sampleRate != rate) {
+                        dryReady = false;
+                        break;
+                    }
+                }
+            }
+            if (dryReady && !remixTracks.empty()) {
+                const bool writeStems = !stemsDirectory.empty();
+                if (writeStems) {
+                    std::error_code failure;
+                    std::filesystem::create_directories(stemsDirectory, failure);
+                    if (failure) return finish(fail("output-io", "failed to create the stem directory"));
+                }
+                std::string ioError;
+                auto mix = std::make_unique<runtime::WavStream>();
+                if (!mix->open(mixOutput, rate, 2, ioError)) return finish(fail("output-io", ioError));
+                std::vector<std::unique_ptr<runtime::WavStream>> stems;
+                std::vector<std::filesystem::path> stemPaths;
+                std::vector<float> stemPeaks(remixTracks.size(), 0.f);
+                if (writeStems) {
+                    for (const auto& remix : remixTracks) {
+                        auto stem = std::make_unique<runtime::WavStream>();
+                        auto path = stemsDirectory / (remix.item->track->id + ".wav");
+                        if (!stem->open(path, rate, 2, ioError)) return finish(fail("output-io", ioError));
+                        stemPaths.push_back(path);
+                        stems.push_back(std::move(stem));
+                    }
+                }
+                std::vector<float> mixed(static_cast<std::size_t>(options.blockSize) * 2, 0.f);
+                std::vector<float> stem(static_cast<std::size_t>(options.blockSize) * 2, 0.f);
+                float mixPeak = 0.f;
+                std::uint64_t mixContentHash = 14695981039346656037ull;
+                const auto remixStarted = now();
+                for (std::uint64_t frame = emitFrom; frame < emitUntil;) {
+                    const auto chunk = static_cast<std::uint32_t>(std::min<std::uint64_t>(options.blockSize, emitUntil - frame));
+                    std::fill(mixed.begin(), mixed.begin() + static_cast<std::size_t>(chunk) * 2, 0.f);
+                    for (std::size_t index = 0; index < remixTracks.size(); ++index) {
+                        auto& remix = remixTracks[index];
+                        for (std::uint32_t offset = 0; offset < chunk; ++offset) {
+                            const auto sampleIndex = static_cast<std::int64_t>(frame + offset);
+                            const auto local = static_cast<std::size_t>(frame + offset - emitFrom) * 2;
+                            float left = 0.f;
+                            float right = 0.f;
+                            if (local + 1 < remix.dry.interleaved.size()) {
+                                left = remix.dry.interleaved[local];
+                                right = remix.dry.interleaved[local + 1];
+                            }
+                            float gainLeft = 0.f;
+                            float gainRight = 0.f;
+                            equalPower(gainAt(remix.automation, sampleIndex, remix.constantGain), remix.pan, gainLeft, gainRight);
+                            const float outLeft = left * gainLeft;
+                            const float outRight = right * gainRight;
+                            stem[static_cast<std::size_t>(offset) * 2] = outLeft;
+                            stem[static_cast<std::size_t>(offset) * 2 + 1] = outRight;
+                            mixed[static_cast<std::size_t>(offset) * 2] += outLeft;
+                            mixed[static_cast<std::size_t>(offset) * 2 + 1] += outRight;
+                            stemPeaks[index] = std::max(stemPeaks[index], std::max(std::fabs(outLeft), std::fabs(outRight)));
+                        }
+                        if (writeStems && !stems[index]->write(stem.data(), static_cast<std::size_t>(chunk) * 2, ioError)) {
+                            return finish(fail("output-io", ioError));
+                        }
+                    }
+                    for (std::uint32_t offset = 0; offset < chunk; ++offset) {
+                        mixPeak = std::max(
+                            mixPeak,
+                            std::max(std::fabs(mixed[static_cast<std::size_t>(offset) * 2]),
+                                     std::fabs(mixed[static_cast<std::size_t>(offset) * 2 + 1])));
+                    }
+                    mixContentHash = mixHash(mixContentHash, mixed.data(), static_cast<std::size_t>(chunk) * 2);
+                    if (!mix->write(mixed.data(), static_cast<std::size_t>(chunk) * 2, ioError)) {
+                        return finish(fail("output-io", ioError));
+                    }
+                    frame += chunk;
+                }
+                mixMs = msBetween(remixStarted, now());
+                for (auto& stemFile : stems) {
+                    if (!stemFile->commit(ioError)) return finish(fail("output-io", ioError));
+                }
+                if (!mix->commit(ioError)) return finish(fail("output-io", ioError));
+                if (!preview) {
+                    std::error_code failure;
+                    std::filesystem::create_directories(cachedMix.parent_path(), failure);
+                    if (!failure) std::filesystem::copy_file(mixOutput, cachedMix, std::filesystem::copy_options::overwrite_existing, failure);
+                }
+                SongRenderReport report;
+                report.ok = true;
+                report.frames = emitUntil - emitFrom;
+                report.originSample = emitFrom;
+                report.tailFrames = preview ? tailBudget : 0;
+                report.peak = mixPeak;
+                report.mixHash = hex64(mixContentHash);
+                report.message = "remixed";
+                report.cacheHit = true;
+                report.cacheReason = options.freezeExternal ? "remix-dry-tracks-freeze-external" : "remix-dry-tracks";
+                report.timing.mixMs = mixMs;
+                report.timing.emittedFrames = report.frames;
+                for (std::size_t index = 0; index < remixTracks.size(); ++index) {
+                    StemReport stemReport;
+                    stemReport.trackId = remixTracks[index].item->track->id;
+                    if (writeStems) stemReport.path = stemPaths[index].string();
+                    stemReport.peak = stemPeaks[index];
+                    stemReport.adapter = remixTracks[index].item->external ? "external-frozen" : "nodsynth";
+                    report.stems.push_back(std::move(stemReport));
+                }
+                return finish(std::move(report));
+            }
+        }
     }
 
     const bool writeStems = !stemsDirectory.empty();
@@ -487,6 +764,7 @@ SongRenderReport renderSong(
         if (!safeTrackId(track.id)) return finish(fail("invalid-song", "track id cannot be used as a stem name"));
         TrackVoice voice;
         voice.trackId = track.id;
+        voice.soundKey = trackSoundKey(song, track, options);
         voice.pan = track.pan;
         voice.gain = static_cast<float>(track.gain);
         if (!track.gainAutomation.empty()) {
@@ -738,10 +1016,22 @@ SongRenderReport renderSong(
     if (!mix->open(mixOutput, rate, 2, ioError)) return finish(fail("output-io", ioError));
     std::vector<std::filesystem::path> committed;
     for (auto& voice : voices) {
-        if (!writeStems) continue;
-        voice.stem = std::make_unique<runtime::WavStream>();
-        voice.stemPath = stemsDirectory / (voice.trackId + ".wav");
-        if (!voice.stem->open(voice.stemPath, rate, 2, ioError)) return finish(fail("output-io", ioError));
+        if (writeStems) {
+            voice.stem = std::make_unique<runtime::WavStream>();
+            voice.stemPath = stemsDirectory / (voice.trackId + ".wav");
+            if (!voice.stem->open(voice.stemPath, rate, 2, ioError)) return finish(fail("output-io", ioError));
+        }
+        if (options.useCache && !preview && !voice.soundKey.empty() &&
+            (!voice.externalTrack || options.freezeExternal) && (options.quality.empty() || options.quality == "final")) {
+            std::error_code failure;
+            const auto path = dryPath(cacheDir, voice.soundKey);
+            std::filesystem::create_directories(path.parent_path(), failure);
+            if (!failure) {
+                voice.dry = std::make_unique<runtime::WavStream>();
+                voice.dryFile = path;
+                if (!voice.dry->open(voice.dryFile, rate, 2, ioError)) return finish(fail("output-io", ioError));
+            }
+        }
     }
     writeMs += msBetween(writeOpenStarted, now());
 
@@ -800,6 +1090,13 @@ SongRenderReport renderSong(
             }
             const auto mixStarted = now();
             chunkDsp += msBetween(dspStarted, mixStarted);
+            if (voice.dry) {
+                for (std::uint32_t frame = 0; frame < chunk; ++frame) {
+                    stem[static_cast<std::size_t>(frame) * 2] = left[frame];
+                    stem[static_cast<std::size_t>(frame) * 2 + 1] = right[frame];
+                }
+                if (!voice.dry->write(stem.data(), static_cast<std::size_t>(chunk) * 2, ioError)) return -1.f;
+            }
             for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                 const auto sample = static_cast<std::int64_t>(rendered + frame);
                 float gainLeft = 0.f;
@@ -870,6 +1167,7 @@ SongRenderReport renderSong(
         mix->abort();
         for (auto& voice : voices) {
             if (voice.stem) voice.stem->abort();
+            if (voice.dry) voice.dry->abort();
         }
         std::error_code ignored;
         for (const auto& path : committed) std::filesystem::remove(path, ignored);
@@ -973,12 +1271,19 @@ SongRenderReport renderSong(
     }
     const auto commitStarted = now();
     for (auto& voice : voices) {
-        if (!voice.stem) continue;
-        if (!voice.stem->commit(ioError)) {
-            discard();
-            return finish(fail("output-io", ioError));
+        if (voice.stem) {
+            if (!voice.stem->commit(ioError)) {
+                discard();
+                return finish(fail("output-io", ioError));
+            }
+            committed.push_back(voice.stemPath);
         }
-        committed.push_back(voice.stemPath);
+        if (voice.dry) {
+            if (!voice.dry->commit(ioError)) {
+                discard();
+                return finish(fail("output-io", ioError));
+            }
+        }
     }
     if (!mix->commit(ioError)) {
         discard();
@@ -1031,7 +1336,72 @@ SongRenderReport renderSong(
                 report.cacheReason = "stored-finished-mix";
             }
         }
+        const bool storedDry = std::any_of(voices.begin(), voices.end(), [](const TrackVoice& voice) { return !voice.dryFile.empty(); });
+        if (storedDry) {
+            if (report.cacheReason == "stored-finished-mix") report.cacheReason = "stored-finished-mix-and-dry-tracks";
+            else report.cacheReason = "stored-dry-tracks";
+        }
     }
     return finish(std::move(report));
+}
+
+CompareReport compareWav(const std::filesystem::path& aPath, const std::filesystem::path& bPath, const CompareOptions& options) {
+    CompareReport report;
+    report.a = analyzeWav(aPath, options.silenceThreshold);
+    report.b = analyzeWav(bPath, options.silenceThreshold);
+    if (!report.a.ok || !report.b.ok) {
+        report.message = !report.a.ok ? report.a.message : report.b.message;
+        return report;
+    }
+    runtime::WavData a;
+    runtime::WavData b;
+    std::string error;
+    if (!runtime::readWav(aPath, a, error) || !runtime::readWav(bPath, b, error)) {
+        report.message = error.empty() ? "failed to read comparison WAV" : error;
+        return report;
+    }
+    report.peakDelta = static_cast<double>(report.b.peak) - static_cast<double>(report.a.peak);
+    report.rmsDelta = report.b.rms - report.a.rms;
+    if (report.a.loudnessLufs && report.b.loudnessLufs) report.lufsDelta = *report.b.loudnessLufs - *report.a.loudnessLufs;
+    if (options.matchLoudness) {
+        if (!report.a.loudnessLufs || !report.b.loudnessLufs) {
+            report.message = "loudness matching unavailable for this format";
+            return report;
+        }
+        const double gainDb = *report.a.loudnessLufs - *report.b.loudnessLufs;
+        const float gain = static_cast<float>(std::pow(10.0, gainDb / 20.0));
+        for (float& sample : b.interleaved) sample *= gain;
+        const auto temp = std::filesystem::temp_directory_path() / "nodsynth-compare-matched.wav";
+        if (!runtime::writeWav(temp, b, error)) {
+            report.message = error;
+            return report;
+        }
+        report.matchedB = analyzeWav(temp, options.silenceThreshold);
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        report.loudnessMatched = true;
+        report.peakDelta = static_cast<double>(report.matchedB.peak) - static_cast<double>(report.a.peak);
+        report.rmsDelta = report.matchedB.rms - report.a.rms;
+        if (report.a.loudnessLufs && report.matchedB.loudnessLufs) {
+            report.lufsDelta = *report.matchedB.loudnessLufs - *report.a.loudnessLufs;
+        }
+    }
+    report.ok = true;
+    report.message = "compared";
+    return report;
+}
+
+persist::Json compareJson(const CompareReport& report) {
+    persist::Json json = persist::Json::object();
+    json.set("status", persist::Json::string(report.ok ? "ok" : "rejected"));
+    json.set("message", persist::Json::string(report.message));
+    json.set("a", analysisJson(report.a));
+    json.set("b", analysisJson(report.b));
+    if (report.loudnessMatched) json.set("matchedB", analysisJson(report.matchedB));
+    json.set("peakDelta", persist::Json::number(report.peakDelta));
+    json.set("rmsDelta", persist::Json::number(report.rmsDelta));
+    if (report.lufsDelta) json.set("lufsDelta", persist::Json::number(*report.lufsDelta));
+    json.set("loudnessMatched", persist::Json::boolean(report.loudnessMatched));
+    return json;
 }
 } // namespace nodsynth::song

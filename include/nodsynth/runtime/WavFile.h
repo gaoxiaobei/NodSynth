@@ -65,27 +65,80 @@ inline std::uint32_t readLe32(const unsigned char* bytes) {
            (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
+inline bool readWavHeader(std::istream& in, WavData& wav, std::uint32_t& dataBytes, std::string& error) {
+    unsigned char header[44];
+    in.read(reinterpret_cast<char*>(header), 44);
+    if (!in || in.gcount() != 44) {
+        error = "WAV file is truncated";
+        return false;
+    }
+    if (std::string(reinterpret_cast<const char*>(header), 4) != "RIFF" ||
+        std::string(reinterpret_cast<const char*>(header + 8), 4) != "WAVE") {
+        error = "WAV file is invalid";
+        return false;
+    }
+    wav.channels = header[22] | (static_cast<std::uint32_t>(header[23]) << 8);
+    wav.sampleRate = readLe32(header + 24);
+    dataBytes = readLe32(header + 40);
+    if (wav.channels == 0 || wav.sampleRate == 0) {
+        error = "WAV file is invalid";
+        return false;
+    }
+    return true;
+}
+
 inline bool readWav(const std::filesystem::path& path, WavData& wav, std::string& error) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         error = "failed to open WAV file";
         return false;
     }
-    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.size() < 44) {
+    std::uint32_t dataBytes = 0;
+    if (!readWavHeader(in, wav, dataBytes, error)) return false;
+    const auto frames = dataBytes / sizeof(float) / wav.channels;
+    wav.interleaved.resize(static_cast<std::size_t>(frames) * wav.channels);
+    in.read(reinterpret_cast<char*>(wav.interleaved.data()), static_cast<std::streamsize>(wav.interleaved.size() * sizeof(float)));
+    if (!in || static_cast<std::size_t>(in.gcount()) != wav.interleaved.size() * sizeof(float)) {
         error = "WAV file is truncated";
         return false;
     }
-    wav.channels = bytes[22] | (static_cast<std::uint32_t>(bytes[23]) << 8);
-    wav.sampleRate = readLe32(bytes.data() + 24);
-    const auto dataBytes = readLe32(bytes.data() + 40);
-    if (std::string(reinterpret_cast<const char*>(bytes.data()), 4) != "RIFF" || dataBytes > bytes.size() - 44) {
-        error = "WAV file is invalid";
+    return true;
+}
+
+// Reads [startFrame, startFrame + frameCount) from a float32 PCM WAV written by this module.
+inline bool readWavRange(
+    const std::filesystem::path& path,
+    WavData& wav,
+    std::uint64_t startFrame,
+    std::uint64_t frameCount,
+    std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        error = "failed to open WAV file";
         return false;
     }
-    const auto frames = dataBytes / sizeof(float) / std::max<std::uint32_t>(wav.channels, 1);
-    wav.interleaved.resize(static_cast<std::size_t>(frames) * wav.channels);
-    std::memcpy(wav.interleaved.data(), bytes.data() + 44, wav.interleaved.size() * sizeof(float));
+    std::uint32_t dataBytes = 0;
+    if (!readWavHeader(in, wav, dataBytes, error)) return false;
+    const auto totalFrames = static_cast<std::uint64_t>(dataBytes / sizeof(float) / wav.channels);
+    if (startFrame > totalFrames) {
+        error = "WAV range starts past the end";
+        return false;
+    }
+    const auto available = totalFrames - startFrame;
+    const auto frames = std::min(frameCount, available);
+    wav.interleaved.assign(static_cast<std::size_t>(frames) * wav.channels, 0.f);
+    if (frames == 0) return true;
+    const auto byteOffset = static_cast<std::uint64_t>(44) + startFrame * wav.channels * sizeof(float);
+    in.seekg(static_cast<std::streamoff>(byteOffset));
+    if (!in) {
+        error = "failed to seek WAV file";
+        return false;
+    }
+    in.read(reinterpret_cast<char*>(wav.interleaved.data()), static_cast<std::streamsize>(wav.interleaved.size() * sizeof(float)));
+    if (!in || static_cast<std::size_t>(in.gcount()) != wav.interleaved.size() * sizeof(float)) {
+        error = "WAV file is truncated";
+        return false;
+    }
     return true;
 }
 

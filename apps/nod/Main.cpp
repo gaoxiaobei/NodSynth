@@ -31,13 +31,15 @@ void usage() {
               << "       nod preset inspect ID [--json]\n"
               << "       nod preset audition ID --output FILE [--json]\n"
               << "       nod analyze FILE [--json]\n"
+              << "       nod compare A.wav B.wav [--match-loudness] [--json]\n"
               << "       nod render FILE --output FILE [--stems DIR] [--report FILE]\n"
               << "                 [--sample-rate 48000] [--block-size 128] [--tail-seconds 2]\n"
               << "                 [--start-tick N] [--end-tick N] [--bars N:N] [--tail-threshold AMPLITUDE] [--max-tail-seconds 8]\n"
-              << "                 [--cache-dir DIR] [--no-cache] [--loose] [--json]\n"
-              << "                 [--fluidsynth EXE] [--vst3-worker EXE]\n"
+              << "                 [--cache-dir DIR] [--no-cache] [--quality final|draft] [--freeze-external]\n"
+              << "                 [--loose] [--json] [--fluidsynth EXE] [--vst3-worker EXE]\n"
               << "Song track IDs are stable. --map TRACK:CHANNEL selects the MIDI source stream, not the Song track id.\n"
-              << "--bars 9:13 is 1-based and half-open: bar 9 up to the start of bar 13.\n";
+              << "--bars 9:13 is 1-based and half-open: bar 9 up to the start of bar 13.\n"
+              << "Audition status stays unheard until a human or playback client marks it heard.\n";
 }
 
 int fail(int code, const std::string& message, bool json) {
@@ -386,6 +388,28 @@ int main(int argc, char** argv) {
             else if (!analysis.ok) std::cerr << analysis.message << '\n';
             return analysis.ok ? 0 : 1;
         }
+        if (command == "compare") {
+            if (argc < 4) return fail(1, "compare requires two WAV files", false);
+            bool json = false;
+            bool matchLoudness = false;
+            std::filesystem::path a;
+            std::filesystem::path b;
+            for (int index = 2; index < argc; ++index) {
+                const std::string_view token = argv[index];
+                if (token == "--json") json = true;
+                else if (token == "--match-loudness") matchLoudness = true;
+                else if (a.empty()) a = token;
+                else if (b.empty()) b = token;
+                else return fail(1, "unexpected argument", json);
+            }
+            if (a.empty() || b.empty()) return fail(1, "compare requires two WAV files", json);
+            nodsynth::song::CompareOptions options;
+            options.matchLoudness = matchLoudness;
+            const auto report = nodsynth::song::compareWav(a, b, options);
+            if (json) std::cout << nodsynth::song::compareJson(report).dump() << '\n';
+            else if (!report.ok) std::cerr << report.message << '\n';
+            return report.ok ? 0 : 1;
+        }
         if (command == "render") {
             std::filesystem::path input;
             std::filesystem::path output;
@@ -400,6 +424,8 @@ int main(int argc, char** argv) {
                 if (token == "--json") json = true;
                 else if (token == "--loose") options.mode = nodsynth::midi::RenderMode::loose;
                 else if (token == "--no-cache") options.useCache = false;
+                else if (token == "--freeze-external") options.freezeExternal = true;
+                else if (const char* value = argument(argc, argv, "--quality", index)) options.quality = value;
                 else if (const char* value = argument(argc, argv, "--output", index)) output = value;
                 else if (const char* value = argument(argc, argv, "--stems", index)) stems = value;
                 else if (const char* value = argument(argc, argv, "--report", index)) reportPath = value;

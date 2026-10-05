@@ -8,6 +8,7 @@
 
 #include <nodsynth/persist/Json.h>
 #include <nodsynth/render/OfflineRenderer.h>
+#include <nodsynth/song/AudioAnalysis.h>
 #include <nodsynth/song/SongDocument.h>
 
 namespace nodsynth::song {
@@ -34,6 +35,8 @@ struct SongRenderOptions {
     std::optional<std::uint32_t> previewEndTick;
     std::filesystem::path cacheDirectory;
     bool useCache{true};
+    std::string quality{"final"};
+    bool freezeExternal{false};
 };
 
 struct StemReport {
@@ -80,8 +83,28 @@ struct SongRenderReport {
     std::string quality{"final"};
     std::string renderId;
     std::string auditionStatus{"unheard"};
+    std::string mixPath;
+    std::optional<std::uint32_t> previewStartTick;
+    std::optional<std::uint32_t> previewEndTick;
     std::vector<StemReport> stems;
     std::vector<Diagnostic> diagnostics;
+};
+
+struct CompareOptions {
+    bool matchLoudness{false};
+    float silenceThreshold{0.0001f};
+};
+
+struct CompareReport {
+    bool ok{false};
+    std::string message;
+    AudioAnalysis a;
+    AudioAnalysis b;
+    AudioAnalysis matchedB;
+    double peakDelta{0};
+    double rmsDelta{0};
+    std::optional<double> lufsDelta;
+    bool loudnessMatched{false};
 };
 
 [[nodiscard]] persist::Json songReportJson(const SongRenderReport& report);
@@ -90,4 +113,7 @@ struct SongRenderReport {
     const SongRenderOptions& options,
     const std::filesystem::path& mixOutput,
     const std::filesystem::path& stemsDirectory = {});
+[[nodiscard]] CompareReport compareWav(
+    const std::filesystem::path& a, const std::filesystem::path& b, const CompareOptions& options = {});
+[[nodiscard]] persist::Json compareJson(const CompareReport& report);
 } // namespace nodsynth::song
