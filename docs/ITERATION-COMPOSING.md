@@ -1,6 +1,6 @@
 # 编曲工作台迭代：从能渲染到顺畅创作
 
-日期：2026-10-05。源码基线：实现批次。状态：A/B/C 已落地。C 含成品 mix 裁片、轨道 dry 缓存与仅改 gain/pan 重混音、耗时拆分、可解释静音、`nod compare`（可选响度匹配）以及 render 报告中的 quality/renderId/auditionStatus（默认 unheard）。Dev 复测：4 小节裁片约 16 ms；暖重混音约 181 ms（冷全曲约 34 s）。Release 固定机器门控与人工鼓听感仍待补证；FluidSynth 联合渲染以现有测试覆盖，本机未装 fluidsynth 时未复跑。
+日期：2026-10-05。源码基线：实现批次。状态：A/B/C 已落地。C 含成品 mix 裁片、轨道 dry 缓存与仅改 gain/pan 重混音、耗时拆分、可解释静音、`nod compare`（可选响度匹配）以及 render 报告中的 quality/renderId/auditionStatus（默认 unheard）。公开命令复测（128 BPM、16 小节、6 轨）：Dev 冷全曲约 34 s、裁片约 16 ms、暖重混音约 181 ms；同一台机器 Release 冷全曲约 5.76 s、裁片约 5 ms、暖重混音约 50 ms（相对冷全曲约 115×，满足 ≤2 s 且 ≥5×）。联合渲染由测试 `NodSynth and FluidSynth share one timeline` 覆盖（已通过）。人工鼓听感仍需人耳验收，峰值/LUFS 不代替。
 
 ## 本轮目标
 
