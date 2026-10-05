@@ -459,3 +459,12 @@ TEST_CASE("example patches stay finite and a stale compile cannot replace a newe
     REQUIRE(session.sounding());
     REQUIRE(session.soundingRevision() == latest);
 }
+
+TEST_CASE("pitch bend offsets the sounding MIDI note") {
+    runtime::VoiceAllocator voices;
+    voices.prepare(4, 48000.0, 16, 0.5, 0.01);
+    const std::vector<runtime::MidiEvent> events{{0, runtime::MidiType::noteOn, 0, 69, 100}, {0, runtime::MidiType::pitchBend, 0, 127, 127}};
+    voices.renderBlock(events, 4);
+    const float expected = 69.f + (8191.f / 8192.f) * runtime::kPitchBendSemitones;
+    REQUIRE(std::fabs(voices.note(0)[0] - expected) < 0.0001f);
+}

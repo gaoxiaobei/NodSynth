@@ -4,18 +4,21 @@ NodSynth 是一个开发中的节点式复音软件合成器。用户在画布�
 
 **当前阶段：Windows 上可以打开默认音色、演奏、编辑节点并保存工程。** 核心仍是不依赖界面的 C++20 库，可在无音频设备时离线渲染 WAV。
 
+后续同时发展独立合成器和 AI 编曲套件。命令行已经能把一份 MIDI 和已保存音色渲染成 WAV；多轨歌曲、外部合成器和 DAW 界面还在后面。
+
 ## 项目文档
 
 - [产品目标与架构](docs/PROJECT.md)：产品边界、核心原则和当前实现。
 - [开发路线与近期计划](docs/ROADMAP.md)：里程碑、交付物和验收条件。
+- [后 MVP 设计](docs/COMPOSITION-SUITE.md)：歌曲工程、命令行/AI 接口、多合成器渲染及插件路线。
 
 ## 当前能力
 
 - 图模型、端口校验、确定性调度、撤销/重做，以及版本化 JSON 工程。
 - 16 声部运行时：振荡器、ADSR、低通、增益、控制运算、反馈延迟、Voice Mix 和立体声输出。
-- 离线渲染命令 `nod_render`，以及 Windows 独立应用 `nodsynth_app`（WASAPI 输出、MIDI 输入、节点画布、屏幕键盘）。
+- 离线渲染命令 `nod_render`：演示音符、soak，以及 `--midi` / `--patch` 的 SMF 渲染、尾音和 JSON 报告。Windows 独立应用 `nodsynth_app` 提供 WASAPI 输出、MIDI 输入、节点画布和屏幕键盘。
 
-Windows 应用只在 `WIN32` 下构建，Linux 和 macOS 的核心测试目标保持不变。本机验收记录见 [ROADMAP.md](docs/ROADMAP.md)。
+Windows 应用只在 `WIN32` 下构建，Linux 和 macOS 的核心测试目标保持不变。本机验收记录见 [MVP 历史](docs/history/MVP-2026-10-04.md)。
 
 ## 构建与测试
 

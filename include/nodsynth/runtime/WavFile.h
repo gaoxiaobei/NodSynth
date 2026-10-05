@@ -88,4 +88,113 @@ inline bool readWav(const std::filesystem::path& path, WavData& wav, std::string
     std::memcpy(wav.interleaved.data(), bytes.data() + 44, wav.interleaved.size() * sizeof(float));
     return true;
 }
+
+class WavStream {
+public:
+    ~WavStream() {
+        if (open_) abort();
+    }
+
+    WavStream() = default;
+    WavStream(const WavStream&) = delete;
+    WavStream& operator=(const WavStream&) = delete;
+
+    [[nodiscard]] bool open(const std::filesystem::path& path, std::uint32_t sampleRate, std::uint32_t channels, std::string& error) {
+        if (channels == 0 || channels > 65535 || sampleRate == 0) {
+            error = "invalid WAV description";
+            return false;
+        }
+        final_ = path;
+        temporary_ = path;
+        temporary_ += ".partial";
+        output_.open(temporary_, std::ios::binary | std::ios::trunc);
+        if (!output_) {
+            error = "failed to open WAV file";
+            return false;
+        }
+        channels_ = channels;
+        output_.write("RIFF", 4);
+        writeLe32(output_, 0);
+        output_.write("WAVE", 4);
+        output_.write("fmt ", 4);
+        writeLe32(output_, 16);
+        writeLe16(output_, 3);
+        writeLe16(output_, static_cast<std::uint16_t>(channels));
+        writeLe32(output_, sampleRate);
+        writeLe32(output_, sampleRate * channels * static_cast<std::uint32_t>(sizeof(float)));
+        writeLe16(output_, static_cast<std::uint16_t>(channels * sizeof(float)));
+        writeLe16(output_, 32);
+        output_.write("data", 4);
+        writeLe32(output_, 0);
+        open_ = static_cast<bool>(output_);
+        if (!open_) error = "failed to write WAV file";
+        return open_;
+    }
+
+    [[nodiscard]] bool write(const float* interleaved, std::size_t values, std::string& error) {
+        const auto bytes = static_cast<std::uint64_t>(values) * sizeof(float);
+        if (!open_ || interleaved == nullptr || values % channels_ != 0 || dataBytes_ > kRiffLimit || bytes > kRiffLimit - dataBytes_) {
+            error = open_ ? "WAV exceeds the RIFF size limit" : "failed to write WAV file";
+            abort();
+            return false;
+        }
+        output_.write(reinterpret_cast<const char*>(interleaved), static_cast<std::streamsize>(bytes));
+        if (!output_) {
+            error = "failed to write WAV file";
+            abort();
+            return false;
+        }
+        dataBytes_ += bytes;
+        return true;
+    }
+
+    [[nodiscard]] bool commit(std::string& error) {
+        if (!open_ || dataBytes_ > kRiffLimit) {
+            error = open_ ? "WAV exceeds the RIFF size limit" : "failed to write WAV file";
+            abort();
+            return false;
+        }
+        const auto size = static_cast<std::uint32_t>(dataBytes_);
+        output_.seekp(4);
+        writeLe32(output_, 36 + size);
+        output_.seekp(40);
+        writeLe32(output_, size);
+        output_.flush();
+        if (!output_) {
+            error = "failed to write WAV file";
+            abort();
+            return false;
+        }
+        output_.close();
+        open_ = false;
+        std::error_code ignored;
+        std::filesystem::remove(final_, ignored);
+        std::error_code failure;
+        std::filesystem::rename(temporary_, final_, failure);
+        if (failure) {
+            error = "failed to commit WAV file";
+            std::filesystem::remove(temporary_, ignored);
+            return false;
+        }
+        return true;
+    }
+
+    void abort() noexcept {
+        if (output_.is_open()) output_.close();
+        open_ = false;
+        std::error_code ignored;
+        std::filesystem::remove(temporary_, ignored);
+    }
+
+    [[nodiscard]] std::uint64_t dataBytes() const noexcept { return dataBytes_; }
+
+private:
+    static constexpr std::uint64_t kRiffLimit = 0xffffffffu - 36u;
+    std::ofstream output_;
+    std::filesystem::path final_;
+    std::filesystem::path temporary_;
+    std::uint64_t dataBytes_{0};
+    std::uint32_t channels_{0};
+    bool open_{false};
+};
 } // namespace nodsynth::runtime

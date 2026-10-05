@@ -7,10 +7,14 @@ add_executable(nod_tests
   model/GraphEditorTests.cpp
   model/SchemaRegistryTests.cpp
   model/LayoutTests.cpp
+  midi/SmfTests.cpp
   persist/ProjectFileTests.cpp
+  render/OfflineRendererTests.cpp
   runtime/RuntimeTests.cpp
 )
-target_link_libraries(nod_tests PRIVATE nod_model nod_nodes nod_persist nod_graphcheck_scenarios Catch2::Catch2WithMain)
+target_link_libraries(nod_tests PRIVATE nod_model nod_nodes nod_persist nod_midi nod_render_core nod_graphcheck_scenarios Catch2::Catch2WithMain)
+target_compile_definitions(nod_tests PRIVATE "NOD_RENDER_EXECUTABLE=\"$<TARGET_FILE:nod_render>\"")
+add_dependencies(nod_tests nod_render)
 include(Catch)
 catch_discover_tests(nod_tests)
 

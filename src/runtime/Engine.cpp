@@ -69,7 +69,7 @@ void Engine::configure(const PrepareConfig& config) {
     fadeLeft_ = 0;
     mixA_.assign(static_cast<std::size_t>(config_.maxFrames) * 2, 0.f);
     mixB_.assign(mixA_.size(), 0.f);
-    blockMidi_.reserve(2048);
+    blockMidi_.reserve(kMaxBlockMidiEvents);
     scratchBytes_ = mixA_.size() * sizeof(float) * 2;
     halt_.store(false, std::memory_order_release);
 }

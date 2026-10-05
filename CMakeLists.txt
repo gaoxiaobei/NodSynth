@@ -46,6 +46,12 @@ target_include_directories(nod_nodes PUBLIC include)
 target_link_libraries(nod_nodes PUBLIC nod_runtime)
 target_compile_features(nod_nodes PUBLIC cxx_std_20)
 
+add_library(nod_midi
+  src/midi/Smf.cpp
+)
+target_include_directories(nod_midi PUBLIC include)
+target_compile_features(nod_midi PUBLIC cxx_std_20)
+
 add_library(nod_persist
   src/persist/Json.cpp
   src/persist/ProjectFile.cpp
@@ -54,8 +60,15 @@ target_include_directories(nod_persist PUBLIC include)
 target_link_libraries(nod_persist PUBLIC nod_model)
 target_compile_features(nod_persist PUBLIC cxx_std_20)
 
+add_library(nod_render_core
+  src/render/OfflineRenderer.cpp
+)
+target_include_directories(nod_render_core PUBLIC include)
+target_link_libraries(nod_render_core PUBLIC nod_nodes nod_persist nod_midi)
+target_compile_features(nod_render_core PUBLIC cxx_std_20)
+
 add_executable(nod_render apps/render/Main.cpp)
-target_link_libraries(nod_render PRIVATE nod_nodes nod_persist)
+target_link_libraries(nod_render PRIVATE nod_render_core)
 
 if(WIN32)
   add_executable(nodsynth_app WIN32 apps/win32/Main.cpp apps/win32/AudioHost.cpp)

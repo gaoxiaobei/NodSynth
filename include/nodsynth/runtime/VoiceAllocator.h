@@ -5,7 +5,10 @@
 #include <vector>
 
 namespace nodsynth::runtime {
-enum class MidiType : std::uint8_t { noteOn, noteOff, sustain, allNotesOff, allSoundOff };
+enum class MidiType : std::uint8_t { noteOn, noteOff, sustain, allNotesOff, allSoundOff, pitchBend };
+
+inline constexpr float kPitchBendSemitones = 2.f;
+inline constexpr std::uint32_t kMaxBlockMidiEvents = 2048;
 
 struct MidiEvent {
     std::uint32_t sampleOffset{0};
@@ -78,6 +81,7 @@ private:
     int stealFadeSamples_{1};
     std::uint64_t age_{1};
     bool sustain_[16]{};
+    float bendSemitones_[16]{};
     std::vector<Voice> voices_;
     std::vector<float> gates_;
     std::vector<float> notes_;

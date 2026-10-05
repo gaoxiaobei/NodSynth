@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace nodsynth::runtime {
 namespace {
@@ -41,8 +42,9 @@ void VoiceAllocator::prepare(
     triggers_.assign(samples, 0.f);
     attenuations_.assign(samples, 1.f);
     ordered_.clear();
-    ordered_.reserve(2048);
+    ordered_.reserve(kMaxBlockMidiEvents);
     for (auto& pedal : sustain_) pedal = false;
+    std::fill(std::begin(bendSemitones_), std::end(bendSemitones_), 0.f);
     setReleaseHold(releaseHoldSeconds);
     stealFadeSamples_ = std::max(1, static_cast<int>(std::lround(std::max(0.0, stealFadeSeconds) * sampleRate)));
 }
@@ -54,6 +56,7 @@ void VoiceAllocator::setReleaseHold(double seconds) noexcept {
 void VoiceAllocator::panic() noexcept {
     for (std::uint32_t index = 0; index < voiceCount_; ++index) freeVoice(index);
     for (auto& pedal : sustain_) pedal = false;
+    std::fill(std::begin(bendSemitones_), std::end(bendSemitones_), 0.f);
     activeCount_ = 0;
 }
 
@@ -87,7 +90,10 @@ void VoiceAllocator::renderBlock(std::span<const MidiEvent> events, std::uint32_
             }
             if (state.activity != Voice::Activity::free) ++activeCount_;
             channel(gates_, voice, maxFrames_)[frame] = state.gate ? 1.f : 0.f;
-            channel(notes_, voice, maxFrames_)[frame] = state.activity == Voice::Activity::free ? 0.f : state.note;
+            const float sounding = state.activity == Voice::Activity::free
+                                        ? 0.f
+                                        : static_cast<float>(state.note) + bendSemitones_[state.channel];
+            channel(notes_, voice, maxFrames_)[frame] = sounding;
             channel(velocities_, voice, maxFrames_)[frame] = state.velocity;
             channel(attenuations_, voice, maxFrames_)[frame] = state.fade;
             if (state.fade < 1.f) state.fade = std::min(1.f, state.fade + state.fadeStep);
@@ -171,6 +177,11 @@ int VoiceAllocator::apply(const MidiEvent& event) {
                 }
             }
             return -1;
+        case MidiType::pitchBend: {
+            const int value = (event.data1 & 0x7f) | ((event.data2 & 0x7f) << 7);
+            bendSemitones_[event.channel] = (static_cast<float>(value) - 8192.f) / 8192.f * kPitchBendSemitones;
+            return -1;
+        }
     }
     return -1;
 }
