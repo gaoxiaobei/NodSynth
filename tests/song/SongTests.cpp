@@ -474,8 +474,7 @@ TEST_CASE("an eight-bar edit keeps the melody, can be undone, and previews from 
     for (auto& track : song.tracks) REQUIRE(song::bindPatch(song, track.id, patch.string(), patch, error));
 
     song::ModelAdapter adapter;
-    adapter.executable = "powershell";
-    adapter.arguments = {"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", NOD_MODEL_ADAPTER};
+    adapter.executable = NOD_MODEL_ADAPTER;
     const auto proposal = song::proposeEdits(song, "keep the melody, rewrite the bass from bar 4, and add harmony", adapter);
     REQUIRE(proposal.ok);
     REQUIRE(song.tracks[0].clips[0].notes[0].pitch == 72);
@@ -800,7 +799,6 @@ TEST_CASE("parameter automation round-trips through the song command", "[song]")
 }
 
 TEST_CASE("a model adapter proposes an edit without changing the song until it is applied", "[song]") {
-    const std::filesystem::path script = NOD_MODEL_ADAPTER;
     song::SongDocument song;
     song.ppq = 480;
     song.tempo.push_back({0, 500000});
@@ -813,8 +811,7 @@ TEST_CASE("a model adapter proposes an edit without changing the song until it i
     song.tracks.push_back(std::move(track));
 
     song::ModelAdapter adapter;
-    adapter.executable = "powershell";
-    adapter.arguments = {"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.string()};
+    adapter.executable = NOD_MODEL_ADAPTER;
     const auto proposal = song::proposeEdits(song, "raise the melody a whole step", adapter);
     REQUIRE(proposal.ok);
     REQUIRE(song.tracks[0].clips[0].notes[0].pitch == 60);
@@ -838,10 +835,16 @@ TEST_CASE("a model adapter proposes an edit without changing the song until it i
     std::string error;
     REQUIRE(song::saveSong(songPath, song, error));
     const std::filesystem::path exe = NOD_EXECUTABLE;
+    const std::filesystem::path adapterExe = NOD_MODEL_ADAPTER;
     const auto quote = [](const std::filesystem::path& path) { return "\"" + path.generic_string() + "\""; };
-    std::string command = "\"" + exe.generic_string() + "\" song propose " + quote(songPath) +
-                          " --adapter powershell --adapter-arg -NoProfile --adapter-arg -ExecutionPolicy --adapter-arg Bypass --adapter-arg -File --adapter-arg " +
-                          quote(script) + " --instruction \"raise the melody\" --output " + quote(commandsPath) + " --json > nul 2>&1";
+    const char* sink =
+#if defined(_WIN32)
+        " > nul 2>&1";
+#else
+        " > /dev/null 2>&1";
+#endif
+    std::string command = quote(exe) + " song propose " + quote(songPath) + " --adapter " + quote(adapterExe) +
+                          " --instruction \"raise the melody\" --output " + quote(commandsPath) + " --json" + sink;
 #if defined(_WIN32)
     command = "\"" + command + "\"";
 #endif
