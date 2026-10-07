@@ -3,10 +3,25 @@
 #include <cstddef>
 #include <optional>
 #include <utility>
+#include <set>
 
 #include <nodsynth/model/GraphEditor.h>
 
 namespace nodsynth::model {
+bool GraphEditor::setMacros(std::vector<GraphSnapshot::Macro> macros) {
+    if(macros==document_.macros_ || macros.size()>64) return false;
+    std::set<std::string> ids;
+    for(const auto& macro:macros) {
+        if(macro.id.empty() || !ids.insert(macro.id).second || macro.mappings.empty() || macro.mappings.size()>64) return false;
+        for(const auto& mapping:macro.mappings) if(!std::isfinite(mapping.minimum) || !std::isfinite(mapping.maximum) ||
+            !document_.findNode(mapping.node) || (mapping.curve!="linear" && mapping.curve!="log") ||
+            (mapping.curve=="log" && (mapping.minimum<=0 || mapping.maximum<=0))) return false;
+    }
+    const auto previous=document_.macros_;
+    commit({[macros=std::move(macros)](GraphDocument& document){document.macros_=macros;},
+        [previous](GraphDocument& document){document.macros_=previous;},ChangeKind::structure});return true;
+}
+
 bool GraphEditor::addNode(NodeRecord node) {
     if (document_.findNode(node.id) != nullptr) {
         return false;
@@ -30,6 +45,7 @@ bool GraphEditor::removeNode(const NodeId& id) {
     }
 
     const NodeRecord removedNode = *node;
+    const auto previousMacros=document_.macros_;
     const std::size_t nodeIndex = static_cast<std::size_t>(node - document_.nodes_.begin());
     std::vector<std::pair<std::size_t, Connection>> removedConnections;
     for (std::size_t index = 0; index < document_.connections_.size(); ++index) {
@@ -46,8 +62,11 @@ bool GraphEditor::removeNode(const NodeId& id) {
             std::erase_if(document.connections_, [&id](const Connection& connection) {
                 return connection.from.nodeId == id || connection.to.nodeId == id;
             });
+            for(auto& macro:document.macros_) std::erase_if(macro.mappings,[&](const auto& mapping){return mapping.node==id;});
+            std::erase_if(document.macros_,[](const auto& macro){return macro.mappings.empty();});
         },
-        [removedNode, nodeIndex, removedConnections](GraphDocument& document) {
+        [removedNode, nodeIndex, removedConnections,previousMacros](GraphDocument& document) {
+            document.macros_=previousMacros;
             document.nodes_.insert(document.nodes_.begin() + static_cast<std::ptrdiff_t>(nodeIndex), removedNode);
             for (const auto& [index, connection] : removedConnections) {
                 document.connections_.insert(
@@ -155,6 +174,7 @@ bool GraphEditor::setViewport(Viewport viewport) {
 }
 
 void GraphEditor::load(GraphSnapshot snapshot) {
+    document_.macros_=std::move(snapshot.macros);
     document_.nodes_ = std::move(snapshot.nodes);
     document_.connections_ = std::move(snapshot.connections);
     undo_.clear();

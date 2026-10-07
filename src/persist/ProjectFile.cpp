@@ -3,6 +3,8 @@
 #include <fstream>
 #include <system_error>
 #include <utility>
+#include <cmath>
+#include <set>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -92,6 +94,14 @@ Json buildRoot(const Json& previous, const model::Viewport& viewport, const mode
         connections.push(connectionJson(connection, matchingConnection(previousConnections, connection)));
     }
     root.set("connections", std::move(connections));
+    auto macros=Json::array();
+    for(const auto& macro:graph.macros) {
+        auto entry=Json::object();entry.set("id",Json::string(macro.id));auto mappings=Json::array();
+        for(const auto& mapping:macro.mappings) {
+            auto item=Json::object();item.set("node",Json::string(mapping.node.value));item.set("parameter",Json::string(mapping.parameter.value));
+            item.set("minimum",Json::number(mapping.minimum));item.set("maximum",Json::number(mapping.maximum));item.set("curve",Json::string(mapping.curve));mappings.push(std::move(item));
+        }entry.set("mappings",std::move(mappings));macros.push(std::move(entry));
+    }root.set("macros",std::move(macros));
     return root;
 }
 
@@ -225,6 +235,23 @@ std::optional<ProjectDocument> loadProject(const std::filesystem::path& path, st
         document.graph.connections.push_back(
             {{model::NodeId{from->find("node")->asString()}, model::PortId{from->find("port")->asString()}},
              {model::NodeId{to->find("node")->asString()}, model::PortId{to->find("port")->asString()}}});
+    }
+    if(const auto* macros=document.root.find("macros")) {
+        if(macros->kind()!=Json::Kind::array || macros->asArray().size()>64) {error="patch-macro: expected at most 64 macros";return std::nullopt;}
+        std::set<std::string> ids;
+        for(const auto& entry:macros->asArray()) {
+            const auto* id=entry.find("id");const auto* mappings=entry.find("mappings");
+            if(!id || id->kind()!=Json::Kind::string || id->asString().empty() || !ids.insert(id->asString()).second ||
+                !mappings || mappings->kind()!=Json::Kind::array || mappings->asArray().empty() || mappings->asArray().size()>64) {error="patch-macro: invalid identity or mappings";return std::nullopt;}
+            model::GraphSnapshot::Macro macro;macro.id=id->asString();
+            for(const auto& item:mappings->asArray()) {
+                const auto* node=item.find("node");const auto* parameter=item.find("parameter");const auto* low=item.find("minimum");const auto* high=item.find("maximum");const auto* curve=item.find("curve");
+                if(!node || node->kind()!=Json::Kind::string || !parameter || parameter->kind()!=Json::Kind::string ||
+                    !low || low->kind()!=Json::Kind::number || !high || high->kind()!=Json::Kind::number || !std::isfinite(low->asNumber()) || !std::isfinite(high->asNumber()) ||
+                    (curve && curve->kind()!=Json::Kind::string)) {error="patch-macro: invalid target or range";return std::nullopt;}
+                macro.mappings.push_back({model::NodeId{node->asString()},model::ParameterId{parameter->asString()},low->asNumber(),high->asNumber(),curve?curve->asString():"linear"});
+            }document.graph.macros.push_back(std::move(macro));
+        }
     }
     return document;
 }

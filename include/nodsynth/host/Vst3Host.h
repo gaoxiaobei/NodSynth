@@ -46,6 +46,7 @@ public:
     [[nodiscard]] bool activate(double sampleRate, std::uint32_t blockSize, std::string& error);
     [[nodiscard]] const Vst3Info& info() const noexcept { return info_; }
     [[nodiscard]] std::vector<Vst3Parameter> parameters() const;
+    [[nodiscard]] std::vector<std::string> classes() const;
     [[nodiscard]] std::int64_t timelineSamples() const noexcept { return timelineSamples_; }
     [[nodiscard]] bool process(
         float* left,
@@ -58,6 +59,11 @@ public:
         const std::vector<Vst3ParamPoint>* parameters = nullptr);
     [[nodiscard]] bool saveState(std::vector<char>& bytes, std::string& error);
     [[nodiscard]] bool restoreState(const std::vector<char>& bytes, std::string& error);
+    [[nodiscard]] bool restart(const std::vector<char>& state,double sampleRate,std::uint32_t blockSize,std::string& error);
+    [[nodiscard]] bool hasAudioInput() const noexcept;
+    [[nodiscard]] double tailSeconds() const noexcept;
+    [[nodiscard]] std::int32_t currentLatency() const noexcept;
+    void setTempo(double bpm) noexcept;
     void close() noexcept;
 
 private:

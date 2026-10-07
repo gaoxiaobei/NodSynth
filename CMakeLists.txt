@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.27)
 project(NodSynth VERSION 0.1.0 LANGUAGES CXX)
+enable_language(C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,13 +38,19 @@ target_include_directories(nod_runtime PUBLIC include)
 target_link_libraries(nod_runtime PUBLIC nod_compiler)
 target_compile_features(nod_runtime PUBLIC cxx_std_20)
 
+add_library(nod_effects src/effects/Effect.cpp)
+target_include_directories(nod_effects PUBLIC include)
+target_compile_features(nod_effects PUBLIC cxx_std_20)
+
 add_library(nod_nodes
   src/nodes/BuiltinNodes.cpp
   src/nodes/DspNodes.cpp
+  src/nodes/Unison.cpp
+  src/nodes/GlobalEffect.cpp
   src/nodes/Patches.cpp
 )
 target_include_directories(nod_nodes PUBLIC include)
-target_link_libraries(nod_nodes PUBLIC nod_runtime)
+target_link_libraries(nod_nodes PUBLIC nod_runtime nod_effects)
 target_compile_features(nod_nodes PUBLIC cxx_std_20)
 
 add_library(nod_midi
@@ -73,25 +80,50 @@ target_link_libraries(nod_render PRIVATE nod_render_core)
 add_library(nod_song
   src/song/SongDocument.cpp
   src/song/SongQuery.cpp
+  src/song/Workflow.cpp
+  src/song/VersionAudition.cpp
   src/song/MidiSong.cpp
   src/song/Process.cpp
   src/song/AudioAnalysis.cpp
   src/song/SongRenderer.cpp
   src/song/ModelClient.cpp
   src/song/Presets.cpp
+  src/song/Sampler.cpp
+  src/song/SampleKit.cpp
+  src/song/Mixer.cpp
   src/song/Resources.cpp
   src/song/SongDiff.cpp
   src/song/Automation.cpp
+  src/song/PatchMigration.cpp
   src/song/AudioExport.cpp
   src/song/Phrases.cpp
 )
 target_include_directories(nod_song PUBLIC include)
-target_link_libraries(nod_song PUBLIC nod_render_core)
+add_library(nod_ebur128 STATIC third_party/libebur128/ebur128/ebur128.c)
+target_include_directories(nod_ebur128 PUBLIC third_party/libebur128/ebur128)
+target_include_directories(nod_ebur128 SYSTEM PRIVATE third_party/libebur128/ebur128/queue)
+if(MSVC)
+  target_compile_definitions(nod_ebur128 PRIVATE _USE_MATH_DEFINES)
+endif()
+if(UNIX)
+  target_link_libraries(nod_ebur128 PUBLIC m)
+endif()
+target_link_libraries(nod_song PUBLIC nod_render_core nod_ebur128)
 target_compile_definitions(nod_song PRIVATE "NOD_BUILTIN_PRESETS=\"${CMAKE_SOURCE_DIR}/presets\"")
 target_compile_features(nod_song PUBLIC cxx_std_20)
 
 add_executable(nod apps/nod/Main.cpp)
 target_link_libraries(nod PRIVATE nod_song)
+add_executable(nod_q2_bench apps/benchmark/Q2.cpp)
+target_link_libraries(nod_q2_bench PRIVATE nod_song)
+add_executable(nod_effect_bench apps/benchmark/Effects.cpp)
+target_link_libraries(nod_effect_bench PRIVATE nod_song)
+add_executable(nod_dsp_calibration apps/benchmark/Calibration.cpp)
+target_link_libraries(nod_dsp_calibration PRIVATE nod_song)
+if(WIN32)
+  target_link_libraries(nod_q2_bench PRIVATE psapi)
+  target_link_libraries(nod_effect_bench PRIVATE psapi)
+endif()
 
 add_library(nod_daw_core src/daw/Timeline.cpp)
 target_include_directories(nod_daw_core PUBLIC include)
@@ -155,8 +187,16 @@ if(NODSYNTH_BUILD_VST3 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3s
   target_include_directories(nod_host PUBLIC include "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3sdk")
   target_link_libraries(nod_host PUBLIC sdk_hosting sdk)
   target_compile_features(nod_host PUBLIC cxx_std_20)
+  add_library(nod_effect_worker src/host/EffectWorker.cpp)
+  target_include_directories(nod_effect_worker PUBLIC include)
+  target_link_libraries(nod_effect_worker PUBLIC nod_host nod_effects PRIVATE psapi)
+  target_compile_definitions(nod_effect_worker PRIVATE NOMINMAX)
+  target_compile_features(nod_effect_worker PUBLIC cxx_std_20)
+  target_link_libraries(nod_song PUBLIC nod_effect_worker)
+  target_compile_definitions(nod_song PRIVATE NOD_HAS_EFFECT_WORKER "NOD_DEFAULT_EFFECT_WORKER=\"${CMAKE_BINARY_DIR}/nod_vst3_worker.exe\"")
+  target_compile_definitions(nod PRIVATE NOD_HAS_EFFECT_WORKER "NOD_DEFAULT_EFFECT_WORKER=\"${CMAKE_BINARY_DIR}/nod_vst3_worker.exe\"")
   add_executable(nod_vst3_worker apps/host/Worker.cpp)
-  target_link_libraries(nod_vst3_worker PRIVATE nod_host nod_midi nod_persist)
+  target_link_libraries(nod_vst3_worker PRIVATE nod_host nod_midi nod_persist nod_effect_worker)
   target_compile_features(nod_vst3_worker PRIVATE cxx_std_20)
   smtg_add_vst3plugin(nodsynth_vst3
     apps/vst3/Processor.cpp
@@ -181,6 +221,15 @@ if(NODSYNTH_BUILD_VST3 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3s
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/nod_latency_probe.vst3/Contents/x86_64-win"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/nod_latency_probe.vst3/Contents/x86_64-win")
   if(NODSYNTH_BUILD_TESTS)
+    smtg_add_vst3plugin(nod_effect_probe tests/vst3/EffectProbe.cpp
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3sdk/public.sdk/source/vst/vstsinglecomponenteffect.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3sdk/public.sdk/source/main/dllmain.cpp"
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vst3sdk/public.sdk/source/main/moduleinit.cpp")
+    target_link_libraries(nod_effect_probe PRIVATE sdk)
+    target_link_options(nod_effect_probe PRIVATE "-Wl,-Bstatic" "-lc++" "-lunwind" "-Wl,-Bdynamic")
+    set_target_properties(nod_effect_probe PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/nod_effect_probe.vst3/Contents/x86_64-win"
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/VST3/$<CONFIG>/nod_effect_probe.vst3/Contents/x86_64-win")
     add_executable(nod_vst3_host_probe tests/vst3/HostProbe.cpp)
     target_link_libraries(nod_vst3_host_probe PRIVATE nod_host)
     target_compile_definitions(nod_vst3_host_probe PRIVATE "NOD_VST3_PATH=\"$<TARGET_FILE:nodsynth_vst3>\"")

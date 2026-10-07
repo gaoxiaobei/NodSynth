@@ -12,6 +12,7 @@ enum class PortKind { audio, control, gate, note };
 enum class NodeScope { perVoice, global };
 enum class PortDomain { sameAsNode, perVoice, global };
 enum class ParameterScale { linear, logarithmic };
+enum class ModulationMode { replace, octave, multiply };
 
 struct PortSchema {
     PortId id;
@@ -31,6 +32,9 @@ struct ParameterSchema {
     double defaultValue;
     ParameterScale scale;
     bool modulatable;
+    std::string modulationPort;
+    ModulationMode modulationMode{ModulationMode::replace};
+    std::string depthParameter;
 };
 
 struct NodeSchema {

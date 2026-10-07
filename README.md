@@ -1,63 +1,45 @@
 # NodSynth
 
-NodSynth 是一个开发中的节点式复音软件合成器。用户在画布上连接振荡器、包络、滤波器和输出节点，构建可由 MIDI 演奏、保存和重新打开的音色。
+NodSynth 是节点式复音合成器和可脚本化的音乐制作套件。它既能作为独立乐器或 VST3 插件演奏，也能让人或 Agent 从空白工程编排、多合成器联合渲染、混音和导出。
 
-**当前阶段：Windows 上可以打开默认音色、演奏、编辑节点并保存工程。** 核心仍是不依赖界面的 C++20 库，可在无音频设备时离线渲染 WAV。
+项目的两个目标是：提供可设计声音的合成器；提供 CLI、Agent 和图形界面共用的音乐制作核心。当前重点平台为 Windows，核心使用 C++20，离线制作无需音频设备。
 
-后续同时发展独立合成器和 AI 编曲套件。`nod_render --midi` 渲染单音色。`nod song` / `nod render` 导入多轨 MIDI，按显式映射用多个 NodSynth 实例或 FluidSynth 输出混音和分轨。NodSynth 可作为 VST3 乐器加载，套件也能离线托管第三方 VST3。Windows 上的 `nod_daw` 提供钢琴卷帘、混音条和播放。
+## 现在能做什么
 
-## 项目文档
+| 范围 | 功能 |
+|---|---|
+| 编曲 | Song v7、MIDI 导入/导出、轨道/片段/章节/角色、pattern/和弦/复制/移调/力度、事务编辑和撤销 |
+| 音源 | 节点式合成、16 声部、立体声 Unison、Noise、ADSR、滤波与调制、one-shot 采样鼓、曲风/角色预设 |
+| 自动化 | 实际参数与宏发现、采样精确 lane、版本化 base+modulation、独立 pump 和局部静音 |
+| 混音 | insert、bus、send/return、EQ、压缩与侧链、Delay、Reverb、过采样 Saturation、前视 Limiter、延迟补偿 |
+| 互通 | NodSynth VST3、隔离 VST3 乐器/效果器、FluidSynth/SoundFont、插件状态与资源收集 |
+| 交付 | float32/PCM16/PCM24、显式抖动、混音/分轨、缓存重混、响度/true peak 分析、区间和版本 A/B 试听 |
+| Agent | 有界查询、角色选择、预设搜索与试听索引、外部模型适配、提案预检、修订冲突与操作成本记录 |
+| 界面 | Windows 合成器画布与屏幕键盘；基础 DAW 时间线、钢琴卷帘、混音条和播放 |
 
-- [产品目标与架构](docs/PROJECT.md)：产品边界、核心原则和当前实现。
-- [开发路线与近期计划](docs/ROADMAP.md)：里程碑、交付物和验收条件。
-- [编曲工作台迭代](docs/ITERATION-COMPOSING.md)：依据 Agent 实际编曲体验，改善原生创作、编辑反馈、音色和试听效率。
-- [编曲命令指南](docs/COMPOSING-COMMANDS.md)：资源收集、乐句、参数自动化和试听记录。
-- [D0–D2 交付验收](docs/history/COMPOSING-2026-10-05.md)：公开命令复测、性能与人工试听状态。
-- [Agent 编曲体感建议](docs/AGENT-COMPOSING-FEEDBACK.md)：trance 复测后的开发优先级（资源路径、diff、乐句原语、预设与试听）。
-- [后 MVP 设计](docs/COMPOSITION-SUITE.md)：歌曲工程、命令行/AI 接口、多合成器渲染及插件路线。
+套件不是完整商业 DAW：不含录音、通用音频片段/时间伸缩、插件商店或发布级跨平台 UI。外部 VST3 效果链用于离线制作，不承诺低延迟实时宿主。技术验证不等于商业音质认证。
 
-## 当前能力
+## 从这里开始
 
-- 歌曲格式 v3：自包含预设资源、完整实体 diff、乐句展开与和弦辅助、采样精确 cutoff/level 自动化、trance/house 预设，以及独立 PCM16 试听和确认记录。
-- 图模型、端口校验、确定性调度、撤销/重做，以及版本化 JSON 工程。
-- 16 声部运行时：振荡器、ADSR、低通、增益、控制运算、反馈延迟、Voice Mix 和立体声输出。
-- 离线渲染命令 `nod_render`：演示音符、soak，以及 `--midi` / `--patch` 的 SMF 渲染、尾音和 JSON 报告。Windows 独立应用 `nodsynth_app` 提供 WASAPI 输出、MIDI 输入、节点画布和屏幕键盘。
+1. [构建与开发](docs/DEVELOPMENT.md)：工具链、依赖、运行入口和验证。
+2. [使用手册](docs/USER-GUIDE.md)：运行附带示例，从建歌到导出；MIDI、资源、版本与常见问题。
+3. [命令参考](docs/COMMAND-REFERENCE.md)：CLI 选项与全部公开编辑操作。
+4. [声音与混音](docs/SOUND-GUIDE.md)：预设、采样、调制、路由、效果和外部插件。
+5. [Agent 工作流](docs/AGENT-WORKFLOW.md)：发现 → 提案 → 审阅 → 应用 → 试听。
 
-Windows 应用只在 `WIN32` 下构建，Linux 和 macOS 的核心测试目标保持不变。本机验收记录见 [MVP 历史](docs/history/MVP-2026-10-04.md)。
+已构建后，在仓库根目录的 PowerShell 中执行（使用新的输出目录）：
 
-## 构建与测试
-
-需要 C++20 编译器、CMake 3.27+ 和 Ninja。默认启用测试，首次配置会从 GitHub 获取 Catch2 v3.15.0，需要可用网络或预先提供依赖。
-
-```sh
-cmake --preset dev
-cmake --build --preset dev -j2
-ctest --preset dev
-./build/dev/nod_graphcheck --scenario valid
-./build/dev/nod_graphcheck --scenario type-error
-./build/dev/nod_graphcheck --scenario cycle
+```powershell
+New-Item -ItemType Directory -Path build/my-first-song
+./build/release/nod.exe song create build/my-first-song/song.json --bpm 128 --bars 4 --ppq 480 --json
+./build/release/nod.exe song apply build/my-first-song/song.json --commands docs/examples/quickstart.json --expect-revision 1 --json
+./build/release/nod.exe render build/my-first-song/song.json --output build/my-first-song/mix.wav --preview-output build/my-first-song/mix.preview.wav --report build/my-first-song/render.json --tail-seconds 3 --json
 ```
 
-Windows 下可使用 `./build/dev/nod_graphcheck.exe`；使用 MSVC 时在已初始化编译环境的开发者终端运行上述命令。
+这是演示工作流的 4 小节工程，不是音质标杆。后续试听与修改见使用手册。
 
-三个场景的预期输出分别是 `valid perVoice=5 global=2`、`rejected code=port-kind-mismatch`、`rejected code=cycle-detected`。非法图被按预期拒绝时，场景工具也返回 0；未知场景返回 64。
+## 兼容与状态
 
-离线渲染一段 48 kHz、128 采样的立体声 WAV：
+当前 Song 格式 v7，可加载 v1–v6；旧 Patch 的声音语义通过显式版本/迁移保留。资源相对路径以 Song 所在目录为准，插件安装仍是外部依赖。Windows 的合成器与 VST3 路径已有技术验证；其他平台不等同于已完成发行。
 
-```sh
-./build/dev/nod_render --output build/dev/smoke.wav --sample-rate 48000 --block-size 128
-```
-
-成功时打印 `wrote 96000 frames` 并返回 0。Release 性能测量不写文件：
-
-```sh
-./build/release/nod_render --soak --sample-rate 48000 --block-size 128 --seconds 600
-```
-
-在 Windows 上启动可演奏的应用：
-
-```sh
-./build/dev/nodsynth_app.exe
-```
-
-`nodsynth_app.exe --self-test` 会编译默认音色、写一份临时工程并打开默认输出设备，成功时返回 0。
+文档依据当前实现整理；附带入门示例已验证建歌、编排、混音/分轨导出与分析。构建、验证入口和工程约束见[开发说明](docs/DEVELOPMENT.md)。

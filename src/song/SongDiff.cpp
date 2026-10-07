@@ -20,15 +20,15 @@ Entities flatten(const SongDocument& song) {
     Entities entities;
     const auto document = toJson(song);
     auto root = Json::object();
-    for (const auto* key : {"ppq", "songRangeEndTick", "tempo", "timeSignatures"})
+    for (const auto* key : {"ppq", "songRangeEndTick", "tempo", "timeSignatures", "masterInserts", "sections"})
         if (const auto* value = document.find(key)) root.set(key, *value);
     entities.emplace("song:", Entity{"song", "", "", root});
     const auto add = [&](const char* type, const Json& item, std::string track, Json data) {
         const auto id = item.find("id")->asString();
         entities.emplace(std::string(type) + ':' + id, Entity{type, id, std::move(track), std::move(data)});
     };
-    for (const auto* type : {"resource", "instrument"}) {
-        const auto* list = document.find(std::string(type) + "s");
+    for (const auto* type : {"resource", "instrument", "bus"}) {
+        const auto* list = document.find(std::string(type)=="bus" ? "buses" : std::string(type) + "s");
         for (const auto& item : list->asArray()) add(type, item, "", item);
     }
     for (const auto& track : document.find("tracks")->asArray()) {

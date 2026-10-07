@@ -19,6 +19,7 @@ public:
     bool connect(Connection connection);
     bool disconnect(Connection connection);
     bool setParameter(const NodeId& id, const ParameterId& parameterId, double value);
+    bool setMacros(std::vector<GraphSnapshot::Macro> macros);
     bool moveNode(const NodeId& id, Point position);
     bool setViewport(Viewport viewport);
     void load(GraphSnapshot snapshot);

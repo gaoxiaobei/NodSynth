@@ -69,30 +69,56 @@ inline std::uint32_t readLe32(const unsigned char* bytes) {
 }
 
 inline bool readWavHeader(std::istream& in, WavData& wav, std::uint32_t& dataBytes, std::string& error) {
-    unsigned char header[44];
-    in.read(reinterpret_cast<char*>(header), 44);
-    if (!in || in.gcount() != 44) {
-        error = "WAV file is truncated";
-        return false;
+    in.seekg(0, std::ios::end);
+    const auto fileSize = in.tellg();
+    in.seekg(0);
+    unsigned char header[12]; in.read(reinterpret_cast<char*>(header), 12);
+    if (!in || std::memcmp(header, "RIFF", 4) || std::memcmp(header + 8, "WAVE", 4)) {
+        error = "WAV RIFF header is invalid or truncated"; return false;
     }
-    if (std::string(reinterpret_cast<const char*>(header), 4) != "RIFF" ||
-        std::string(reinterpret_cast<const char*>(header + 8), 4) != "WAVE") {
-        error = "WAV file is invalid";
-        return false;
+    const auto riffEnd = static_cast<std::uint64_t>(readLe32(header + 4)) + 8;
+    if (fileSize < 12 || riffEnd < 12 || riffEnd > static_cast<std::uint64_t>(fileSize)) {
+        error = "WAV RIFF size exceeds file length"; return false;
     }
-    wav.channels = header[22] | (static_cast<std::uint32_t>(header[23]) << 8);
-    wav.sampleRate = readLe32(header + 24);
-    dataBytes = readLe32(header + 40);
-    wav.encoding = header[20] | (static_cast<std::uint16_t>(header[21]) << 8);
-    wav.bitsPerSample = header[34] | (static_cast<std::uint16_t>(header[35]) << 8);
-    if ((wav.encoding != 3 || wav.bitsPerSample != 32) && (wav.encoding != 1 || wav.bitsPerSample != 16)) {
-        error = "WAV must be float32 or PCM16"; return false;
+    bool haveFormat = false;
+    while (static_cast<std::uint64_t>(in.tellg()) + 8 <= riffEnd) {
+        unsigned char chunk[8]; in.read(reinterpret_cast<char*>(chunk), 8);
+        const auto size = readLe32(chunk + 4);
+        const auto begin = static_cast<std::uint64_t>(in.tellg());
+        if (!in || begin + size + (size & 1u) > riffEnd) { error = "WAV chunk is truncated"; return false; }
+        if (!std::memcmp(chunk, "fmt ", 4)) {
+            if (size < 16 || haveFormat) { error = "WAV format chunk is invalid"; return false; }
+            unsigned char format[16]; in.read(reinterpret_cast<char*>(format), 16);
+            wav.encoding = format[0] | (static_cast<std::uint16_t>(format[1]) << 8);
+            wav.channels = format[2] | (static_cast<std::uint32_t>(format[3]) << 8);
+            wav.sampleRate = readLe32(format + 4);
+            wav.bitsPerSample = format[14] | (static_cast<std::uint16_t>(format[15]) << 8);
+            if(wav.encoding==0xfffe) {
+                if(size<40) {error="WAV extensible format is truncated";return false;}
+                unsigned char extension[24];in.read(reinterpret_cast<char*>(extension),24);
+                const unsigned char guidTail[12]{0,0,0x10,0,0x80,0,0,0xaa,0,0x38,0x9b,0x71};
+                const auto extensionBytes=extension[0]|(static_cast<std::uint16_t>(extension[1])<<8);
+                const auto validBits=extension[2]|(static_cast<std::uint16_t>(extension[3])<<8);
+                const auto subtype=readLe32(extension+8);
+                if(extensionBytes<22 || validBits==0 || validBits>wav.bitsPerSample || std::memcmp(extension+12,guidTail,12) || (subtype!=1 && subtype!=3)) {
+                    error="WAV extensible subtype or valid bits is unsupported";return false;
+                }
+                wav.encoding=static_cast<std::uint16_t>(subtype);
+            }
+            const auto alignment = format[12] | (static_cast<std::uint32_t>(format[13]) << 8);
+            if ((! (wav.encoding == 3 && wav.bitsPerSample == 32) &&
+                 ! (wav.encoding == 1 && (wav.bitsPerSample == 16 || wav.bitsPerSample == 24 || wav.bitsPerSample == 32))) ||
+                wav.channels == 0 || wav.sampleRate == 0 || alignment != wav.channels * (wav.bitsPerSample / 8)) {
+                error = "WAV must have valid float32 or PCM16/24/32 format"; return false;
+            }
+            haveFormat = true;
+        } else if (!std::memcmp(chunk, "data", 4)) {
+            if (!haveFormat || size % (wav.channels * (wav.bitsPerSample / 8))) { error = "WAV data format or size is invalid"; return false; }
+            dataBytes = size; return true;
+        }
+        in.seekg(static_cast<std::streamoff>(begin + size + (size & 1u)));
     }
-    if (wav.channels == 0 || wav.sampleRate == 0) {
-        error = "WAV file is invalid";
-        return false;
-    }
-    return true;
+    error = "WAV is missing its format or data chunk"; return false;
 }
 
 inline bool readWav(const std::filesystem::path& path, WavData& wav, std::string& error) {
@@ -109,9 +135,14 @@ inline bool readWav(const std::filesystem::path& path, WavData& wav, std::string
     wav.interleaved.resize(static_cast<std::size_t>(frames) * wav.channels);
     if (wav.encoding == 1) {
         for (auto& value : wav.interleaved) {
-            unsigned char bytes[2]; in.read(reinterpret_cast<char*>(bytes), 2);
+            unsigned char bytes[4]{}; in.read(reinterpret_cast<char*>(bytes), sampleBytes);
             if (!in) { error = "WAV file is truncated"; return false; }
-            value = static_cast<float>(static_cast<std::int16_t>(bytes[0] | (static_cast<std::uint16_t>(bytes[1]) << 8))) / 32768.f;
+            if (sampleBytes == 2) value = static_cast<float>(static_cast<std::int16_t>(bytes[0] | (static_cast<std::uint16_t>(bytes[1]) << 8))) / 32768.f;
+            else if (sampleBytes == 3) {
+                std::int32_t sample = bytes[0] | (static_cast<std::uint32_t>(bytes[1]) << 8) | (static_cast<std::uint32_t>(bytes[2]) << 16);
+                if (sample & 0x800000) sample -= 0x1000000;
+                value = static_cast<float>(sample / 8388608.0);
+            } else value = static_cast<float>(static_cast<std::int32_t>(readLe32(bytes)) / 2147483648.0);
         }
         return true;
     }
@@ -147,7 +178,7 @@ inline bool readWavRange(
     const auto frames = std::min(frameCount, available);
     wav.interleaved.assign(static_cast<std::size_t>(frames) * wav.channels, 0.f);
     if (frames == 0) return true;
-    const auto byteOffset = static_cast<std::uint64_t>(44) + startFrame * wav.channels * sizeof(float);
+    const auto byteOffset = static_cast<std::uint64_t>(in.tellg()) + startFrame * wav.channels * sizeof(float);
     in.seekg(static_cast<std::streamoff>(byteOffset));
     if (!in) {
         error = "failed to seek WAV file";

@@ -10,4 +10,6 @@ namespace nodsynth::nodes {
 [[nodiscard]] model::GraphSnapshot sinePatch();
 [[nodiscard]] model::GraphSnapshot filterPatch();
 [[nodiscard]] model::GraphSnapshot delayPatch();
+[[nodiscard]] model::GraphSnapshot stereoFilterPatch();
+[[nodiscard]] model::GraphSnapshot unisonPatch(bool pad = false);
 } // namespace nodsynth::nodes

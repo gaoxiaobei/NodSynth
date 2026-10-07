@@ -37,6 +37,24 @@ int main(int argc, char** argv) {
     auto batch = nodsynth::persist::Json::object();
     batch.set("schemaVersion", nodsynth::persist::Json::number(1));
     auto commands = nodsynth::persist::Json::array();
+    if (instruction.starts_with("parameter-workflow:")) {
+        auto lane=nodsynth::persist::Json::object();lane.set("op",nodsynth::persist::Json::string("set-parameter-automation"));
+        lane.set("track",nodsynth::persist::Json::string("melody"));
+        lane.set("parameter",nodsynth::persist::Json::string(instruction.substr(19)));
+        lane.set("valueDomain",nodsynth::persist::Json::string("physical"));
+        auto points=nodsynth::persist::Json::array();auto point=nodsynth::persist::Json::object();
+        point.set("tick",nodsynth::persist::Json::number(0));point.set("value",nodsynth::persist::Json::number(1800));
+        points.push(point);lane.set("points",std::move(points));commands.push(std::move(lane));
+        auto collect=nodsynth::persist::Json::object();collect.set("op",nodsynth::persist::Json::string("collect-resources"));
+        collect.set("includeAssets",nodsynth::persist::Json::boolean(true));commands.push(std::move(collect));
+        batch.set("commands",std::move(commands));return writeAll(argv[3],batch.dump())?0:1;
+    }
+    if (instruction=="invalid-workflow-proposal") {
+        auto invalid=nodsynth::persist::Json::object();invalid.set("op",nodsynth::persist::Json::string("set-role"));
+        invalid.set("track",nodsynth::persist::Json::string("missing-track"));invalid.set("role",nodsynth::persist::Json::string("lead"));
+        commands.push(std::move(invalid));batch.set("commands",std::move(commands));
+        return writeAll(argv[3],batch.dump())?0:1;
+    }
     const auto* notes = query->find("notes");
     static const std::vector<nodsynth::persist::Json> noNotes;
     const auto& list = notes != nullptr ? notes->asArray() : noNotes;

@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -22,6 +23,14 @@
 #include <nodsynth/song/SongDocument.h>
 #include <nodsynth/song/SongRenderer.h>
 #include <nodsynth/song/AudioExport.h>
+#include <nodsynth/song/Automation.h>
+#include <nodsynth/song/Sampler.h>
+#include <nodsynth/song/Workflow.h>
+#include <nodsynth/nodes/BuiltinNodes.h>
+#include <nodsynth/persist/ProjectFile.h>
+#if defined(NOD_HAS_EFFECT_WORKER)
+#include <nodsynth/host/EffectWorker.h>
+#endif
 
 namespace {
 std::filesystem::path filePath(std::string_view text) {
@@ -39,14 +48,25 @@ void usage() {
               << "                 [--diff-detail summary|notes|full]\n"
               << "       nod song undo FILE [--output FILE] [--diff-detail summary|notes|full] [--json]\n"
               << "       nod song redo FILE [--output FILE] [--diff-detail summary|notes|full] [--json]\n"
-              << "       nod song query FILE [--view summary|tracks|notes|capabilities|legacy]\n"
-              << "                 [--track ID] [--bars N:N] [--start-tick N] [--end-tick N]\n"
+              << "       nod song query FILE [--view summary|tracks|notes|capabilities|roles|sections|workflow|legacy]\n"
+              << "                 [--track ID] [--role ROLE] [--bars N:N] [--start-tick N] [--end-tick N]\n"
               << "                 [--limit N] [--cursor TEXT] [--onset-only] [--json]\n"
               << "       nod song propose FILE --adapter EXE --instruction TEXT --output FILE [--adapter-arg ARG]... [--json]\n"
               << "       nod song export-midi FILE --output FILE\n"
               << "       nod preset list [--role ROLE] [--json]\n"
+              << "       nod preset search TEXT [--role ROLE] [--json]\n"
+              << "       nod preset index --output DIRECTORY [--role ROLE] [--json]\n"
+              << "       nod version audition A.song.json B.song.json --output DIRECTORY [--bars N:N | --section ID] [--json]\n"
+              << "       nod workflow metrics TRACE.json [--json]\n"
               << "       nod preset inspect ID [--json]\n"
               << "       nod preset audition ID --output FILE [--json]\n"
+              << "       nod patch inspect FILE [--json]\n"
+              << "       nod effect inspect BINARY [--state FILE] [--class NAME] [--json]\n"
+              << "       nod plugin inspect BINARY [--state FILE] [--class NAME] [--json]\n"
+              << "       nod patch create-stereo FILE [--json]\n"
+              << "       nod patch migrate FILE --output FILE --decisions FILE [--json]\n"
+              << "       nod patch create-unison FILE [--pad] [--json]\n"
+              << "       nod sampler create-kit DIRECTORY [--punch-kick] [--json]\n"
               << "       nod analyze FILE [--json]\n"
               << "       nod compare A.wav B.wav [--match-loudness] [--json]\n"
               << "       nod play AUDIO --report FILE [--records FILE] [--json]\n"
@@ -155,7 +175,7 @@ int main(int argc, char** argv) {
             std::optional<std::uint32_t> limit;
             std::string view;
             std::string trackId;
-            std::string bars;
+            std::string bars,role;
             std::string cursor;
             std::string meter;
             double bpm = 120;
@@ -202,6 +222,8 @@ int main(int argc, char** argv) {
                     view = value;
                 } else if (const char* value = argument(argc, argv, "--track", index)) {
                     trackId = value;
+                } else if (const char* value = argument(argc, argv, "--role", index)) {
+                    role = value;
                 } else if (const char* value = argument(argc, argv, "--bars", index)) {
                     bars = value;
                 } else if (const char* value = argument(argc, argv, "--limit", index)) {
@@ -343,6 +365,7 @@ int main(int argc, char** argv) {
                 if (!cursor.empty()) query.cursor = cursor;
                 query.onsetOnly = onsetOnly;
                 query.expandAutomation = expandAutomation;
+                if (!role.empty()) query.role=role;
                 if (!bars.empty()) {
                     const auto colon = bars.find(':');
                     if (colon == std::string::npos) return fail(1, "query --bars must be START:END", json);
@@ -379,12 +402,141 @@ int main(int argc, char** argv) {
                     nodsynth::persist::Json report = nodsynth::persist::Json::object();
                     report.set("status", nodsynth::persist::Json::string("ok"));
                     report.set("output", nodsynth::persist::Json::string(pathText(output)));
+                    report.set("baseRevision", nodsynth::persist::Json::number(static_cast<double>(song->revision)));
+                    report.set("diff", proposal.diff);
+                    report.set("pendingChecks", proposal.pendingChecks);
                     std::cout << report.dump() << '\n';
                 }
                 return 0;
             }
             usage();
             return 1;
+        }
+        if (command == "workflow") {
+            if (argc<4 || std::string_view(argv[2])!="metrics" || argc>5 || (argc==5 && std::string_view(argv[4])!="--json"))
+                return fail(1,"expected workflow metrics TRACE.json [--json]",true);
+            std::ifstream file(filePath(argv[3]),std::ios::binary);
+            if (!file) return fail(4,"cannot read workflow trace",true);
+            const std::string text((std::istreambuf_iterator<char>(file)),std::istreambuf_iterator<char>());std::string error;
+            const auto trace=nodsynth::persist::Json::parse(text,error);if (!trace) return fail(1,error,true);
+            const auto report=nodsynth::song::workflowMetrics(*trace);std::cout<<report.dump()<<'\n';
+            return report.find("status")->asString()=="ok"?0:1;
+        }
+        if (command == "version") {
+            if (argc<5 || std::string_view(argv[2])!="audition") return fail(1,"expected version audition A B",true);
+            std::filesystem::path output;std::string bars,section;
+            nodsynth::song::SongRenderOptions options;options.tailSeconds=8;
+            for (int i=5;i<argc;++i) {
+                const std::string_view token=argv[i];
+                if (token=="--json") {}
+                else if (token=="--no-cache") options.useCache=false;
+                else if (token=="--freeze-external") options.freezeExternal=true;
+                else if (const auto* value=argument(argc,argv,"--output",i)) output=filePath(value);
+                else if (const auto* value=argument(argc,argv,"--bars",i)) bars=value;
+                else if (const auto* value=argument(argc,argv,"--section",i)) section=value;
+                else if (const auto* value=argument(argc,argv,"--tail-seconds",i)) options.tailSeconds=std::stod(value);
+                else if (const auto* value=argument(argc,argv,"--vst3-worker",i)) options.tools.push_back({"vst3",filePath(value),120000});
+                else if (const auto* value=argument(argc,argv,"--fluidsynth",i)) options.tools.push_back({"fluidsynth",filePath(value),120000});
+                else return fail(1,"unknown version audition option",true);
+            }
+            if (output.empty()) return fail(1,"version audition requires --output",true);
+            const auto report=nodsynth::song::renderVersions(filePath(argv[3]),filePath(argv[4]),output,options,bars,section);
+            std::cout<<report.dump()<<'\n';return report.find("status")->asString()=="ok"?0:1;
+        }
+        if (command == "sampler") {
+            if (argc < 4 || std::string_view(argv[2]) != "create-kit") return fail(1, "expected sampler create-kit DIRECTORY", true);
+            bool punchKick=false;
+            for (int i = 4; i < argc; ++i) {
+                if (std::string_view(argv[i]) == "--punch-kick") punchKick=true;
+                else if (std::string_view(argv[i]) != "--json") return fail(1, "unknown option", true);
+            }
+            std::string error;
+            if (!nodsynth::song::createSampleKit(filePath(argv[3]), error,punchKick)) return fail(4, error, true);
+            auto result = nodsynth::persist::Json::object();
+            result.set("status", nodsynth::persist::Json::string("ok"));
+            result.set("kit", nodsynth::persist::Json::string(pathText(filePath(argv[3]) / "kit.json")));
+            result.set("auditionStatus", nodsynth::persist::Json::string("unheard"));
+            std::cout << result.dump() << '\n'; return 0;
+        }
+        if (command == "effect" || command=="plugin") {
+#if defined(NOD_HAS_EFFECT_WORKER)
+            if(argc<4 || std::string_view(argv[2])!="inspect") return fail(1,"usage: nod effect inspect BINARY [--state FILE] [--class NAME] [--json]",true);
+            nodsynth::host::EffectWorkerOptions options;options.plugin=filePath(argv[3]);options.executable=NOD_DEFAULT_EFFECT_WORKER;
+            const auto sibling=std::filesystem::absolute(filePath(argv[0])).parent_path()/"nod_vst3_worker.exe";
+            if(std::filesystem::exists(sibling)) options.executable=sibling;
+            for(int i=4;i<argc;++i) {
+                if(std::string_view(argv[i])=="--state" && i+1<argc) options.state=filePath(argv[++i]);
+                else if(std::string_view(argv[i])=="--class" && i+1<argc) options.className=argv[++i];
+                else if(std::string_view(argv[i])!="--json") return fail(1,"unknown effect inspection option",true);
+            }
+            options.inspectionOnly=command=="plugin";nodsynth::host::PluginInspection inspection;std::string error;
+            if(!nodsynth::host::inspectPlugin(options,inspection,error)) return fail(2,error,true);
+            using Json=nodsynth::persist::Json;auto result=Json::object();result.set("status",Json::string("ok"));
+            result.set("pluginHash",Json::string(nodsynth::song::hashFile(options.plugin)));
+            result.set("stateHash",Json::string(options.state.empty()?"":nodsynth::song::hashFile(options.state)));
+            result.set("latencySamples",Json::number(inspection.info.latencySamples));result.set("tailSeconds",std::isfinite(inspection.tailSeconds)?Json::number(inspection.tailSeconds):Json::null());
+            result.set("className",Json::string(inspection.info.name));result.set("vendor",Json::string(inspection.info.vendor));result.set("version",Json::string(inspection.info.version));
+            result.set("subCategories",Json::string(inspection.info.subCategories));result.set("workerPrivateBytes",Json::number(inspection.workerPrivateBytes));
+            auto classes=Json::array();for(const auto& name:inspection.classes) classes.push(Json::string(name));result.set("classes",std::move(classes));
+            auto parameters=Json::array();
+            for(const auto& p:inspection.parameters) {
+                auto item=Json::object();item.set("id",Json::string(p.id));item.set("title",Json::string(p.title));
+                item.set("unit",Json::string(p.unit));item.set("minimum",Json::number(p.minimum));item.set("maximum",Json::number(p.maximum));
+                item.set("default",Json::number(p.defaultValue));item.set("automatable",Json::boolean(p.automatable));
+                if(!p.automatable) item.set("reason",Json::string("plugin marks parameter read-only or non-automatable"));
+                parameters.push(std::move(item));
+            }
+            result.set("parameters",std::move(parameters));std::cout<<result.dump()<<'\n';return 0;
+#else
+            return fail(2,"this build has no isolated VST3 effect host",true);
+#endif
+        }
+        if (command == "patch") {
+            if (argc < 4) { usage(); return 1; }
+            const std::string_view sub = argv[2];
+            const auto path = filePath(argv[3]);
+            bool pad = false;
+            std::filesystem::path migrationOutput,decisionsPath;
+            for (int i = 4; i < argc; ++i) {
+                if (std::string_view(argv[i]) == "--pad" && sub == "create-unison") pad = true;
+                else if(sub=="migrate" && std::string_view(argv[i])=="--output" && i+1<argc) migrationOutput=filePath(argv[++i]);
+                else if(sub=="migrate" && std::string_view(argv[i])=="--decisions" && i+1<argc) decisionsPath=filePath(argv[++i]);
+                else if (std::string_view(argv[i]) != "--json") return fail(1, "unknown option", true);
+            }
+            std::string error;
+            if(sub=="migrate") {
+                if(migrationOutput.empty() || decisionsPath.empty() || std::filesystem::exists(migrationOutput)) return fail(1,"migration requires decisions and a new output path",true);
+                auto document=nodsynth::persist::loadProject(path,error);if(!document) return fail(2,error,true);
+                std::ifstream input(decisionsPath,std::ios::binary);if(!input) return fail(2,"failed to open migration decisions",true);
+                const std::string text((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+                const auto decisions=nodsynth::persist::Json::parse(text,error);if(!decisions) return fail(2,error,true);
+                auto migrated=nodsynth::song::migrateProductionGraph(document->graph,*decisions,error);if(!migrated) return fail(3,error,true);
+                auto preview=nodsynth::song::productionMigrationPreview(document->graph);document->graph=std::move(*migrated);
+                preview.set("status",nodsynth::persist::Json::string("applied"));preview.set("applied",nodsynth::persist::Json::boolean(true));
+                if(!nodsynth::persist::saveProject(migrationOutput,*document,error)) return fail(4,error,true);
+                auto result=nodsynth::persist::Json::object();result.set("status",nodsynth::persist::Json::string("ok"));
+                result.set("output",nodsynth::persist::Json::string(pathText(migrationOutput)));result.set("migration",std::move(preview));
+                result.set("applied",nodsynth::persist::Json::boolean(true));result.set("auditionStatus",nodsynth::persist::Json::string("unheard"));
+                std::cout<<result.dump()<<'\n';return 0;
+            }
+            if (sub == "create-stereo" || sub == "create-unison") {
+                if (std::filesystem::exists(path)) return fail(1, "patch output already exists", true);
+                auto document = nodsynth::persist::projectFromGraph(sub == "create-unison" ? nodsynth::nodes::unisonPatch(pad) : nodsynth::nodes::stereoFilterPatch());
+                if (!nodsynth::persist::saveProject(path, document, error)) return fail(4, error, true);
+                auto result = nodsynth::persist::Json::object();
+                result.set("status", nodsynth::persist::Json::string("ok"));
+                result.set("output", nodsynth::persist::Json::string(pathText(path)));
+                std::cout << result.dump() << '\n'; return 0;
+            }
+            if (sub == "inspect") {
+                auto graph = nodsynth::render::loadPatch(path, error);
+                if (!graph) return fail(2, error, true);
+                auto result = nodsynth::persist::Json::object();
+                result.set("parameters", nodsynth::song::parametersJson(*graph));
+                result.set("migration", nodsynth::song::productionMigrationPreview(*graph));
+                std::cout << result.dump() << '\n'; return 0;
+            }
+            return fail(1, "unknown patch command", true);
         }
         if (command == "preset") {
             if (argc < 3) {
@@ -407,12 +559,39 @@ int main(int argc, char** argv) {
                 else if (id.empty()) id = std::string(token);
                 else return fail(1, "unexpected argument", json);
             }
-            if (sub == "list") {
+            if (sub == "list" || sub == "search") {
                 std::optional<std::string> filter;
                 if (!role.empty()) filter = role;
-                const auto presets = nodsynth::song::listPresets(root, filter);
+                const auto presets = sub=="search" ? nodsynth::song::searchPresets(root,id,filter) : nodsynth::song::listPresets(root, filter);
                 if (json) std::cout << nodsynth::song::listJson(presets).dump() << '\n';
                 return 0;
+            }
+            if (sub == "index") {
+                if (output.empty()) return fail(1,"index requires --output DIRECTORY",json);
+                std::error_code failure;
+                if (!std::filesystem::create_directory(output,failure)) return fail(4,"index output must be a new directory with an existing parent",json);
+                std::optional<std::string> filter;if (!role.empty()) filter=role;
+                auto entries=nodsynth::persist::Json::array();bool allOk=true;
+                for (const auto& preset:nodsynth::song::listPresets(root,filter)) {
+                    const auto audio=output/(preset.id+".wav");
+                    nodsynth::song::PresetAuditionOptions options;options.presetsRoot=root;
+                    const auto rendered=nodsynth::song::renderPresetAudition(preset.id,audio,options);
+                    allOk=allOk && rendered.ok;
+                    auto item=nodsynth::song::presetJson(preset);
+                    item.set("status",nodsynth::persist::Json::string(rendered.ok?"ok":"rejected"));
+                    item.set("message",nodsynth::persist::Json::string(rendered.message));
+                    if (rendered.ok) {
+                        item.set("audio",nodsynth::persist::Json::string(pathText(std::filesystem::absolute(audio))));
+                        item.set("fileHash",nodsynth::persist::Json::string(nodsynth::song::hashFile(audio)));
+                    }
+                    entries.push(std::move(item));
+                }
+                auto manifest=nodsynth::persist::Json::object();manifest.set("presets",std::move(entries));
+                manifest.set("status",nodsynth::persist::Json::string(allOk?"ok":"partial"));
+                manifest.set("auditionStatus",nodsynth::persist::Json::string("unheard"));
+                std::string error;
+                if (!nodsynth::song::writeJsonAtomic(output/"index.json",manifest,error)) return fail(4,error,json);
+                std::cout<<manifest.dump()<<'\n';return allOk?0:1;
             }
             if (sub == "inspect") {
                 if (id.empty()) return fail(1, "inspect requires a preset id", json);
@@ -522,7 +701,7 @@ int main(int argc, char** argv) {
             std::filesystem::path output;
             std::filesystem::path stems;
             std::filesystem::path reportPath;
-            std::string bars;
+            std::string bars,section;
             bool json = false;
             bool sawInput = false;
             nodsynth::song::SongRenderOptions options;
@@ -534,6 +713,10 @@ int main(int argc, char** argv) {
                 else if (token == "--freeze-external") options.freezeExternal = true;
                 else if (const char* value = argument(argc, argv, "--format", index)) options.format = value;
                 else if (const char* value = argument(argc, argv, "--pcm-overflow", index)) options.pcmOverflow = value;
+                else if (const char* value = argument(argc, argv, "--dither", index)) options.dither = value;
+                else if (const char* value = argument(argc, argv, "--dither-seed", index)) {
+                    const auto seed=std::stoull(value);if(seed>UINT32_MAX) return fail(1,"dither seed must fit uint32",json);options.ditherSeed=static_cast<std::uint32_t>(seed);
+                }
                 else if (const char* value = argument(argc, argv, "--preview-output", index)) options.previewOutput = filePath(value);
                 else if (const char* value = argument(argc, argv, "--quality", index)) options.quality = value;
                 else if (const char* value = argument(argc, argv, "--output", index)) output = filePath(value);
@@ -551,6 +734,8 @@ int main(int argc, char** argv) {
                     options.previewEndTick = static_cast<std::uint32_t>(std::stoul(value));
                 } else if (const char* value = argument(argc, argv, "--bars", index)) {
                     bars = value;
+                } else if (const char* value = argument(argc, argv, "--section", index)) {
+                    section = value;
                 }
                 else if (const char* value = argument(argc, argv, "--fluidsynth", index)) {
                     nodsynth::song::SongRenderOptions::ExternalTool tool;
@@ -575,6 +760,12 @@ int main(int argc, char** argv) {
             if (!song) return fail(1, error, json);
             options.baseDirectory = input.parent_path();
             options.songHash = nodsynth::song::hashFile(input);
+            if (!section.empty()) {
+                if (!bars.empty() || options.previewStartTick || options.previewEndTick) return fail(1,"section cannot be combined with another range",json);
+                const auto found=std::find_if(song->sections.begin(),song->sections.end(),[&](const auto& item){return item.id==section;});
+                if (found==song->sections.end()) return fail(1,"section was not found",json);
+                options.previewStartTick=found->startTick;options.previewEndTick=found->endTick;
+            }
             if (!bars.empty()) {
                 const auto colon = bars.find(':');
                 if (colon == std::string::npos) return fail(1, "render --bars must be START:END", json);

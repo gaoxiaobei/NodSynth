@@ -941,12 +941,12 @@ TEST_CASE("a model adapter proposes an edit without changing the song until it i
 TEST_CASE("preset catalog lists roles and can bind and audition a kick", "[song][preset]") {
     const std::filesystem::path presetsRoot = NOD_PRESETS_ROOT;
     const auto listed = song::listPresets(presetsRoot);
-    REQUIRE(listed.size() == 12);
+    REQUIRE(listed.size() == 21);
     REQUIRE(song::findPreset(presetsRoot, "kick"));
     REQUIRE(song::findPreset(presetsRoot, "snare-clap")->role == "clap");
     REQUIRE(song::listPresets(presetsRoot, "hat").size() == 2);
     const auto json = song::listJson(listed);
-    REQUIRE(json.find("count")->asNumber() == 12);
+    REQUIRE(json.find("count")->asNumber() == 21);
 
     song::SongDocument song;
     song.ppq = 480;

@@ -1,0 +1,274 @@
+{
+  "format": "nodsynth.project",
+  "formatVersion": 1,
+  "viewport": {
+    "originX": 0,
+    "originY": 0,
+    "zoom": 1
+  },
+  "nodes": [
+    {
+      "id": "midi",
+      "typeId": "nod.midi-input",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 40,
+        "y": 120
+      }
+    },
+    {
+      "id": "note-to-frequency",
+      "typeId": "nod.note-to-frequency",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 280,
+        "y": 40
+      }
+    },
+    {
+      "id": "oscillator",
+      "typeId": "nod.unison-v2",
+      "schemaVersion": 2,
+      "parameters": {
+        "blend": 0.6,
+        "detune": 28,
+        "level": 0.08,
+        "phase": 1,
+        "seed": 1979,
+        "spread": 1,
+        "voices": 8
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 540,
+        "y": 40
+      }
+    },
+    {
+      "id": "envelope",
+      "typeId": "nod.adsr",
+      "schemaVersion": 1,
+      "parameters": {
+        "attack": 2,
+        "decay": 0.4,
+        "release": 0.2,
+        "sustain": 0.8
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 540,
+        "y": 220
+      }
+    },
+    {
+      "id": "gain",
+      "typeId": "nod.gain-v2",
+      "schemaVersion": 2,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 820,
+        "y": 120
+      }
+    },
+    {
+      "id": "voice-mix",
+      "typeId": "nod.voice-mix-v2",
+      "schemaVersion": 2,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 1080,
+        "y": 120
+      }
+    },
+    {
+      "id": "audio-output",
+      "typeId": "nod.audio-output",
+      "schemaVersion": 1,
+      "parameters": {},
+      "opaqueState": "{}",
+      "position": {
+        "x": 1320,
+        "y": 120
+      }
+    },
+    {
+      "id": "filter",
+      "typeId": "nod.lowpass-v2",
+      "schemaVersion": 2,
+      "parameters": {
+        "cutoff": 300,
+        "depth": 0
+      },
+      "opaqueState": "{}",
+      "position": {
+        "x": 820,
+        "y": 40
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "node": "midi",
+        "port": "note"
+      },
+      "to": {
+        "node": "note-to-frequency",
+        "port": "note"
+      }
+    },
+    {
+      "from": {
+        "node": "note-to-frequency",
+        "port": "frequency"
+      },
+      "to": {
+        "node": "oscillator",
+        "port": "frequency"
+      }
+    },
+    {
+      "from": {
+        "node": "midi",
+        "port": "gate"
+      },
+      "to": {
+        "node": "envelope",
+        "port": "gate"
+      }
+    },
+    {
+      "from": {
+        "node": "envelope",
+        "port": "envelope"
+      },
+      "to": {
+        "node": "gain",
+        "port": "gain"
+      }
+    },
+    {
+      "from": {
+        "node": "gain",
+        "port": "audio-out"
+      },
+      "to": {
+        "node": "voice-mix",
+        "port": "voices"
+      }
+    },
+    {
+      "from": {
+        "node": "voice-mix",
+        "port": "audio"
+      },
+      "to": {
+        "node": "audio-output",
+        "port": "audio"
+      }
+    },
+    {
+      "from": {
+        "node": "envelope",
+        "port": "envelope"
+      },
+      "to": {
+        "node": "filter",
+        "port": "cutoff-mod"
+      }
+    },
+    {
+      "from": {
+        "node": "filter",
+        "port": "audio-out"
+      },
+      "to": {
+        "node": "gain",
+        "port": "audio-in"
+      }
+    },
+    {
+      "from": {
+        "node": "oscillator",
+        "port": "audio"
+      },
+      "to": {
+        "node": "filter",
+        "port": "audio-in"
+      }
+    }
+  ],
+  "macros": [
+    {
+      "mappings": [
+        {
+          "minimum": 120,
+          "node": "filter",
+          "maximum": 10000,
+          "curve": "log",
+          "parameter": "cutoff"
+        }
+      ],
+      "id": "tone"
+    },
+    {
+      "mappings": [
+        {
+          "minimum": 0,
+          "node": "filter",
+          "maximum": 4,
+          "curve": "linear",
+          "parameter": "depth"
+        }
+      ],
+      "id": "contour"
+    },
+    {
+      "mappings": [
+        {
+          "minimum": 0.03,
+          "node": "envelope",
+          "maximum": 1.5,
+          "curve": "log",
+          "parameter": "release"
+        }
+      ],
+      "id": "release"
+    },
+    {
+      "mappings": [
+        {
+          "minimum": 0,
+          "node": "oscillator",
+          "maximum": 1,
+          "curve": "linear",
+          "parameter": "spread"
+        }
+      ],
+      "id": "width"
+    }
+  ],
+  "production": {
+    "recommendedVelocity": [
+      50,
+      110
+    ],
+    "widthPolicy": "stereo; highpass on track",
+    "version": 1,
+    "schemaVersion": 1,
+    "auditionStatus": "unheard",
+    "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+    "recommendedMidiRange": [
+      60,
+      84
+    ],
+    "dependencies": [],
+    "role": "riser"
+  }
+}

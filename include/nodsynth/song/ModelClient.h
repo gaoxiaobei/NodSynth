@@ -21,6 +21,8 @@ struct ModelProposal {
     std::string code;
     std::string message;
     persist::Json batch{persist::Json::object()};
+    persist::Json diff{persist::Json::object()};
+    persist::Json pendingChecks{persist::Json::array()};
 };
 
 // Ask an external model adapter for a command batch. The adapter receives the song query and the

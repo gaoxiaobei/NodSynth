@@ -22,6 +22,8 @@ struct AudioAnalysis {
     std::uint64_t frames{0};
     float peak{0.f};
     std::optional<double> loudnessLufs;
+    std::optional<double> truePeakDbtp,shortTermMaxLufs,loudnessRangeLu;
+    std::string meterVersion{"libebur128-1.2.6"};
     std::uint64_t silentFrames{0};
     // Compatibility: true if any sample at the start (or the whole file) is at or
     // below the sample-peak silenceThreshold. This is not a musical silence gate.
@@ -38,6 +40,8 @@ struct AudioAnalysis {
     std::optional<double> samplePeakDb;
     double rms{0.0};
     bool fullySilent{false};
+    std::optional<double> correlation;
+    double midEnergy{0}, sideEnergy{0}, monoRms{0}, dcLeft{0}, dcRight{0};
 };
 
 [[nodiscard]] AudioAnalysis analyzeWav(const std::filesystem::path& path, float silenceThreshold = 0.0001f);

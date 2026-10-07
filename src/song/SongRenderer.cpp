@@ -1,4 +1,6 @@
 #include <nodsynth/song/SongRenderer.h>
+#include <nodsynth/song/Sampler.h>
+#include <nodsynth/song/Mixer.h>
 
 #include <algorithm>
 #include <chrono>
@@ -31,38 +33,12 @@ bool safeTrackId(const std::string& id) {
            id.find("..") == std::string::npos;
 }
 
-void equalPower(double gain, double pan, float& left, float& right) {
-    const double angle = (std::clamp(pan, -1.0, 1.0) + 1.0) * 0.78539816339744830962;
-    left = static_cast<float>(gain * std::cos(angle));
-    right = static_cast<float>(gain * std::sin(angle));
-}
-
 struct TimedEvent {
     std::int64_t sample{0};
     int priority{0};
     std::uint32_t order{0};
     runtime::MidiEvent midi{};
 };
-
-struct GainSample {
-    std::int64_t sample{0};
-    float gain{1.f};
-};
-
-float gainAt(const std::vector<GainSample>& points, std::int64_t sample, float constant) {
-    if (points.empty()) return constant;
-    if (sample <= points.front().sample) return points.front().gain;
-    if (sample >= points.back().sample) return points.back().gain;
-    auto upper = std::upper_bound(points.begin(), points.end(), sample, [](std::int64_t value, const GainSample& point) {
-        return value < point.sample;
-    });
-    if (upper == points.begin()) return upper->gain;
-    const auto lower = upper - 1;
-    if (upper == points.end() || upper->sample == lower->sample) return lower->gain;
-    const double span = static_cast<double>(upper->sample - lower->sample);
-    const double position = static_cast<double>(sample - lower->sample) / span;
-    return static_cast<float>(lower->gain + position * (upper->gain - lower->gain));
-}
 
 bool toEngine(const PerformanceEvent& event, runtime::MidiEvent& midi) {
     midi.channel = event.channel;
@@ -181,14 +157,14 @@ bool decodeWav(const std::filesystem::path& path, std::uint32_t expectedRate, De
 struct TrackVoice {
     std::string trackId;
     std::string adapter{"nodsynth"};
-    double pan{0};
-    float gain{1.f};
-    std::vector<GainSample> automation;
+    PreparedTrackMix mix;
     std::unique_ptr<runtime::Engine> engine;
+    std::unique_ptr<OneShotSampler> sampler;
     std::vector<float> external;
     bool externalTrack{false};
     std::filesystem::path asset;
     std::string className;
+    std::filesystem::path pluginState;
     std::uint32_t latencySamples{0};
     struct ParameterSample {
         std::int64_t sample{0};
@@ -248,6 +224,7 @@ persist::Json sharedRenderJson(const SongDocument& song, const SongRenderOptions
     json.set("blockSize", persist::Json::number(options.blockSize));
     json.set("tailSeconds", persist::Json::number(options.tailSeconds));
     json.set("quality", persist::Json::string(options.quality.empty() ? "final" : options.quality));
+    json.set("synthEngineVersion",persist::Json::number(2));
     json.set("endTick", persist::Json::number(endTick(song)));
     persist::Json tempo = persist::Json::array();
     for (const auto& point : song.tempo) {
@@ -316,11 +293,30 @@ std::string trackSoundKey(const SongDocument& song, const Track& track, const So
     auto bases = persist::Json::object();
     for (const auto& [id, value] : track.parameterValues) bases.set(id, persist::Json::number(value));
     json.set("parameterValues", std::move(bases));
-    json.set("automationEngineVersion", persist::Json::number(2));
+    json.set("automationEngineVersion", persist::Json::number(6));
     for (const auto& instrument : song.instruments) {
         if (instrument.id != track.instrumentId) continue;
         json.set("kind", persist::Json::string(instrument.kind == InstrumentKind::nodsynth ? "nodsynth" : instrument.adapter));
-        if (instrument.kind == InstrumentKind::vst3) json.set("vst3AutomationVersion", persist::Json::number(2));
+        if (instrument.kind == InstrumentKind::vst3) {
+            json.set("vst3AutomationVersion", persist::Json::number(3));
+            json.set("className",persist::Json::string(instrument.name));
+            for(const auto& resource:song.resources) if(resource.id==instrument.stateResourceId)
+                json.set("pluginStateHash",persist::Json::string(resource.hash));
+        }
+        if (instrument.kind == InstrumentKind::sampler) {
+            json.set("samplerEngineVersion", persist::Json::number(1));
+            json.set("samples", sampleLayersJson(instrument.samples));
+            auto dependencies = persist::Json::array();
+            for (const auto& layer : instrument.samples) for (const auto& resource : song.resources) {
+                if (resource.id != layer.resourceId) continue;
+                auto item = persist::Json::object();
+                item.set("id", persist::Json::string(resource.id));
+                item.set("hash", persist::Json::string(resource.hash));
+                item.set("path", persist::Json::string(resource.path));
+                dependencies.push(std::move(item));
+            }
+            json.set("sampleDependencies", std::move(dependencies));
+        }
         for (const auto& resource : song.resources) {
             if (resource.id != instrument.resourceId) continue;
             json.set("resourceHash", persist::Json::string(resource.hash));
@@ -338,6 +334,11 @@ std::string fingerprint(const SongDocument& song, const SongRenderOptions& optio
         item.set("id", persist::Json::string(track.id));
         item.set("sound", persist::Json::string(trackSoundKey(song, track, options)));
         if (includeMix) {
+            item.set("output",persist::Json::string(track.output));
+            item.set("inserts",effectsJson(track.inserts));item.set("sends",sendsJson(track.sends));
+            item.set("mixEngineVersion", persist::Json::number(2));
+            const auto controls = mixControlsJson(track);
+            for (const auto& [field, value] : controls.items()) item.set(field, value);
             item.set("gain", persist::Json::number(track.gain));
             item.set("pan", persist::Json::number(track.pan));
             persist::Json automation = persist::Json::array();
@@ -352,6 +353,23 @@ std::string fingerprint(const SongDocument& song, const SongRenderOptions& optio
         tracks.push(std::move(item));
     }
     json.set("tracks", std::move(tracks));
+    if(includeMix) {
+        json.set("routing",routingJson(song));json.set("routingEngineVersion",persist::Json::number(2));
+        persist::Json dependencies=persist::Json::object();
+        const auto add=[&](const auto& inserts) {
+            for(const auto& effect:inserts) if(effect.type=="vst3") {
+                for(const auto& id:{effect.pluginResource,effect.stateResource}) {
+                    if(id.empty()) continue;
+                    for(const auto& resource:song.resources) if(resource.id==id) dependencies.set(id,persist::Json::string(resource.hash));
+                }
+            }
+        };
+        for(const auto& track:song.tracks) add(track.inserts);
+        for(const auto& bus:song.buses) add(bus.inserts);
+        add(song.masterInserts);
+        json.set("effectDependencies",std::move(dependencies));
+        json.set("effectHostVersion",persist::Json::number(1));
+    }
     return hashText(json.dump(-1));
 }
 
@@ -406,6 +424,7 @@ persist::Json songReportJson(const SongRenderReport& report) {
     json.set("quality", persist::Json::string(report.quality));
     json.set("renderId", persist::Json::string(report.renderId));
     json.set("auditionStatus", persist::Json::string(report.auditionStatus));
+    json.set("effects",report.effects);
     json.set("mixPath", persist::Json::string(report.mixPath));
     json.set("format", persist::Json::string(report.format));
     json.set("fileHash", persist::Json::string(report.fileHash));
@@ -413,15 +432,21 @@ persist::Json songReportJson(const SongRenderReport& report) {
     json.set("previewHash", persist::Json::string(report.previewHash));
     json.set("exportGain", persist::Json::number(report.exportGain));
     json.set("previewGain", persist::Json::number(report.previewGain));
-    json.set("dither", persist::Json::string("none"));
-    json.set("ditherSeed", persist::Json::null());
+    json.set("dither", persist::Json::string(report.dither));
+    json.set("ditherSeed",report.dither=="none"?persist::Json::null():persist::Json::number(report.ditherSeed));
+    json.set("floatMasterPath",persist::Json::string(report.floatMasterPath));
+    json.set("floatMasterHash",persist::Json::string(report.floatMasterHash));
     if (report.previewStartTick) json.set("previewStartTick", persist::Json::number(*report.previewStartTick));
     if (report.previewEndTick) json.set("previewEndTick", persist::Json::number(*report.previewEndTick));
-    json.set("latencySamples", persist::Json::number(0));
+    json.set("latencySamples", persist::Json::number(report.latencySamples));
+    json.set("mixerCommittedBytes", persist::Json::number(static_cast<double>(report.mixerCommittedBytes)));
+    json.set("declaredEffectTailSeconds", persist::Json::number(report.declaredEffectTailSeconds));
+    json.set("stemPolicy",persist::Json::string("dry tracks before inserts; post tracks after inserts/fader/pump/mute; returns/buses after their chain and fader; master after master chain; isolated stems need not sum to master"));
     persist::Json stems = persist::Json::array();
     for (const auto& stem : report.stems) {
         persist::Json item = persist::Json::object();
         item.set("track", persist::Json::string(stem.trackId));
+        item.set("role", persist::Json::string(stem.role));
         item.set("path", persist::Json::string(stem.path));
         item.set("hash", persist::Json::string(stem.hash));
         item.set("peak", persist::Json::number(stem.peak));
@@ -465,15 +490,32 @@ SongRenderReport renderSong(
     std::uint64_t emittedFrames = 0;
     auto externalStarted = started;
     bool externalRunning = false;
+    const auto external=[](const auto& inserts) {return std::any_of(inserts.begin(),inserts.end(),[](const auto& effect){return effect.type=="vst3";});};
+    const bool externalEffects=external(song.masterInserts) ||
+        std::any_of(song.tracks.begin(),song.tracks.end(),[&](const auto& track){return external(track.inserts);}) ||
+        std::any_of(song.buses.begin(),song.buses.end(),[&](const auto& bus){return external(bus.inserts);});
+    const bool externalSources=std::any_of(song.tracks.begin(),song.tracks.end(),[&](const auto& track){
+        const auto* instrument=findInstrument(song,track.instrumentId);
+        return instrument && (instrument->kind==InstrumentKind::vst3 || instrument->kind==InstrumentKind::externalCli);
+    });
     auto finish = [&](SongRenderReport report) {
         if (report.ok) {
+            if(externalEffects && !options.freezeExternal)
+                report.diagnostics.push_back({"non-deterministic","VST3 effects are rendered afresh; freezeExternal opts into reuse of a captured mix",0,-1});
             report.format = options.format;
+            report.dither=options.dither;report.ditherSeed=options.ditherSeed;
             std::string error;
-            if (options.format == "pcm16" || !options.previewOutput.empty()) {
+            if (options.format == "pcm16" || options.format=="pcm24" || !options.previewOutput.empty()) {
                 runtime::WavData audio;
-                if (!runtime::readWav(mixOutput, audio, error) ||
-                    (!options.previewOutput.empty() && !writePcm16(options.previewOutput, audio, options.pcmOverflow == "attenuate", report.previewGain, error)) ||
-                    (options.format == "pcm16" && !writePcm16(mixOutput, audio, options.pcmOverflow == "attenuate", report.exportGain, error))) {
+                if(!runtime::readWav(mixOutput,audio,error)) {report.ok=false;report.code="export-failed";report.message=error;return report;}
+                if(options.format!="float32") {
+                    auto floatMaster=mixOutput;floatMaster.replace_extension(".float.wav");
+                    if(floatMaster==mixOutput) {floatMaster=mixOutput;floatMaster+=".master.wav";}
+                    if(!runtime::writeWav(floatMaster,audio,error)) {report.ok=false;report.code="export-failed";report.message=error;return report;}
+                    report.floatMasterPath=utf8Path(floatMaster);report.floatMasterHash=hashFile(floatMaster);
+                }
+                if ((!options.previewOutput.empty() && !writePcm(options.previewOutput, audio,16, options.pcmOverflow == "attenuate",options.dither,options.ditherSeed, report.previewGain, error)) ||
+                    (options.format != "float32" && !writePcm(mixOutput, audio,options.format=="pcm24"?24:16, options.pcmOverflow == "attenuate",options.dither,options.ditherSeed, report.exportGain, error))) {
                     report.ok = false; report.code = "export-failed"; report.message = error;
                 }
                 if (!options.previewOutput.empty() && report.ok) {
@@ -521,10 +563,17 @@ SongRenderReport renderSong(
     if (!runtime::validSampleRate(options.sampleRate) || options.sampleRate != std::floor(options.sampleRate) ||
         !runtime::validFrameCount(options.blockSize) || options.tailSeconds < 0.0 || options.maxTailSeconds < 0.0 ||
         options.tailThreshold < 0.0 || options.maxEventsPerBlock == 0 || mixOutput.empty() ||
-        (options.format != "float32" && options.format != "pcm16") ||
+        (options.format != "float32" && options.format != "pcm16" && options.format!="pcm24") ||
+        (options.dither!="none" && options.dither!="tpdf") || (options.format=="float32" && options.dither!="none") ||
         (options.pcmOverflow != "reject" && options.pcmOverflow != "attenuate") ||
         (!options.previewOutput.empty() && std::filesystem::absolute(options.previewOutput).lexically_normal() == std::filesystem::absolute(mixOutput).lexically_normal())) {
         return finish(fail("invalid-options", "sample rate, block size, tail, or output is invalid"));
+    }
+    if(options.format!="float32" && !options.previewOutput.empty()) {
+        auto preserved=mixOutput;preserved.replace_extension(".float.wav");
+        if(preserved==mixOutput) {preserved=mixOutput;preserved+=".master.wav";}
+        if(std::filesystem::absolute(options.previewOutput).lexically_normal()==std::filesystem::absolute(preserved).lexically_normal())
+            return finish(fail("invalid-options","preview output would overwrite the preserved float master"));
     }
     const auto validation = validateRenderReady(song, options.baseDirectory);
     if (!validation.ok) return finish(fail("invalid-song", "song failed validation", validation.diagnostics));
@@ -560,13 +609,14 @@ SongRenderReport renderSong(
         std::string error;
         auto graph = render::loadPatch(resolveResourcePath(options.baseDirectory.empty() ? song.baseDirectory : options.baseDirectory, resource->path), error);
         std::vector<PreparedLane> checked;
-        if (!graph || !prepareAutomation(song, track, *graph, nullptr, rate, checked, error)) return finish(fail("unsupported-automation", error));
+        if (!graph || !prepareAutomation(song, track, *graph, nullptr, rate, checked, error)) return finish(fail(automationErrorCode(error), error));
     }
     const auto mixKey = fingerprint(song, options, true);
+    const bool cacheMix=options.useCache && (!(externalEffects || externalSources) || options.freezeExternal);
     const auto cacheDir = options.cacheDirectory.empty() ? mixOutput.parent_path() / ".nod-cache" : options.cacheDirectory;
     const auto cachedMix = cacheDir / mixKey / "mix.wav";
     const bool preview = options.previewStartTick.has_value() || options.previewEndTick.has_value();
-    if (options.useCache && preview && std::filesystem::exists(cachedMix)) {
+    if (cacheMix && preview && std::filesystem::exists(cachedMix)) {
         if (!options.previewStartTick || !options.previewEndTick || *options.previewEndTick < *options.previewStartTick) {
             return finish(fail("invalid-options", "preview requires a start tick and an end tick"));
         }
@@ -596,10 +646,16 @@ SongRenderReport renderSong(
         for (float sample : sliced.interleaved) peak = std::max(peak, std::fabs(sample));
         report.peak = peak;
         report.mixHash = mixKey;
+        std::ifstream metadata(cachedMix.parent_path()/"effects.json",std::ios::binary);
+        if(metadata) {
+            const std::string text((std::istreambuf_iterator<char>(metadata)),std::istreambuf_iterator<char>());
+            std::string metadataError;const auto effects=persist::Json::parse(text,metadataError);
+            if(effects && effects->kind()==persist::Json::Kind::array) report.effects=*effects;
+        }
         return finish(std::move(report));
     }
 
-    if (options.useCache && (options.quality.empty() || options.quality == "final")) {
+    if (options.useCache && !hasRouting(song) && (options.quality.empty() || options.quality == "final")) {
         struct CachedTrack {
             const Track* track{nullptr};
             std::filesystem::path dry;
@@ -616,7 +672,7 @@ SongRenderReport renderSong(
             }
             CachedTrack item;
             item.track = &track;
-            if (instrument->kind == InstrumentKind::nodsynth) {
+            if (instrument->kind == InstrumentKind::nodsynth || instrument->kind == InstrumentKind::sampler) {
                 item.dry = dryPath(cacheDir, trackSoundKey(song, track, options));
                 if (!std::filesystem::exists(item.dry)) {
                     remixable = false;
@@ -653,9 +709,7 @@ SongRenderReport renderSong(
             struct RemixTrack {
                 const CachedTrack* item{nullptr};
                 runtime::WavData dry;
-                std::vector<GainSample> automation;
-                float constantGain{1.f};
-                double pan{0.0};
+                PreparedTrackMix mix;
             };
             std::vector<RemixTrack> remixTracks;
             remixTracks.reserve(cached.size());
@@ -664,16 +718,9 @@ SongRenderReport renderSong(
             for (const auto& item : cached) {
                 RemixTrack remix;
                 remix.item = &item;
-                remix.constantGain = static_cast<float>(item.track->gain);
-                remix.pan = item.track->pan;
-                for (const auto& point : item.track->gainAutomation) {
-                    const auto sample = sampleAtTick(song, point.tick, rate);
-                    if (!sample) return finish(fail("sample-overflow", "automation time does not fit in a sample index"));
-                    remix.automation.push_back({*sample, static_cast<float>(point.gain)});
-                }
-                std::stable_sort(remix.automation.begin(), remix.automation.end(), [](const GainSample& left, const GainSample& right) {
-                    return left.sample < right.sample;
-                });
+                std::string mixError;
+                if (!prepareTrackMix(song, *item.track, rate, remix.mix, mixError))
+                    return finish(fail("invalid-mix", mixError));
                 std::string wavError;
                 runtime::WavData header;
                 std::uint32_t dataBytes = 0;
@@ -746,7 +793,7 @@ SongRenderReport renderSong(
                             }
                             float gainLeft = 0.f;
                             float gainRight = 0.f;
-                            equalPower(gainAt(remix.automation, sampleIndex, remix.constantGain), remix.pan, gainLeft, gainRight);
+                            remix.mix.gainsAt(sampleIndex, gainLeft, gainRight);
                             const float outLeft = left * gainLeft;
                             const float outRight = right * gainRight;
                             stem[static_cast<std::size_t>(offset) * 2] = outLeft;
@@ -825,18 +872,8 @@ SongRenderReport renderSong(
         TrackVoice voice;
         voice.trackId = track.id;
         voice.soundKey = trackSoundKey(song, track, options);
-        voice.pan = track.pan;
-        voice.gain = static_cast<float>(track.gain);
-        if (!track.gainAutomation.empty()) {
-            for (const auto& point : track.gainAutomation) {
-                const auto sample = sampleAtTick(song, point.tick, rate);
-                if (!sample) return finish(fail("sample-overflow", "automation time does not fit in a sample index"));
-                voice.automation.push_back({*sample, static_cast<float>(point.gain)});
-            }
-            std::stable_sort(voice.automation.begin(), voice.automation.end(), [](const GainSample& left, const GainSample& right) {
-                return left.sample < right.sample;
-            });
-        }
+        std::string mixError;
+        if (!prepareTrackMix(song, track, rate, voice.mix, mixError)) return finish(fail("invalid-mix", mixError));
         for (const auto& lane : track.parameterAutomation) {
             for (const auto& point : lane.points) {
                 const auto sample = sampleAtTick(song, point.tick, rate);
@@ -863,9 +900,30 @@ SongRenderReport renderSong(
                 voice.externalTrack = true;
                 voice.adapter = instrument->adapter;
                 voice.className = instrument->name;
-            } else if (instrument->kind != InstrumentKind::nodsynth) {
+                for(const auto& resource:song.resources) if(resource.id==instrument->stateResourceId)
+                    voice.pluginState=std::filesystem::absolute(resolveResourcePath(options.baseDirectory.empty()?song.baseDirectory:options.baseDirectory,resource.path));
+            } else if (instrument->kind != InstrumentKind::nodsynth && instrument->kind != InstrumentKind::sampler) {
                 return finish(fail("external-unsupported", "this instrument kind is not available"));
             }
+            if (instrument->kind == InstrumentKind::sampler) {
+                voice.adapter = "sampler-v1";
+                if (options.useCache && !preview && options.tailMode == render::TailMode::fixed) {
+                    runtime::WavData dry;
+                    std::string cacheError;
+                    if (runtime::readWav(dryPath(cacheDir, voice.soundKey), dry, cacheError) && dry.channels == 2 && dry.sampleRate == rate && dry.encoding == 3) {
+                        voice.external = std::move(dry.interleaved); voice.cachedDry = true;
+                    }
+                }
+                if (!voice.cachedDry) {
+                    voice.sampler = std::make_unique<OneShotSampler>();
+                    std::string sampleError;
+                    if (!voice.sampler->prepare(*instrument, song, options.baseDirectory, rate, sampleError)) return finish(fail("sampler-prepare", sampleError));
+                }
+                for (const auto& clip : track.clips) for (const auto& note : clip.notes)
+                    if (std::none_of(instrument->samples.begin(), instrument->samples.end(), [&](const auto& layer) {
+                        return note.pitch >= layer.lowNote && note.pitch <= layer.highNote && note.velocity >= layer.lowVelocity && note.velocity <= layer.highVelocity;
+                    })) return finish(fail("sample-unmapped", "sampler note/velocity has no layer", {{"sample-unmapped", "note has no sample", clip.startTick + note.tick, -1, note.id}}));
+            } else {
             const auto resource = std::find_if(song.resources.begin(), song.resources.end(), [&](const Resource& candidate) {
                 return candidate.id == instrument->resourceId;
             });
@@ -913,13 +971,14 @@ SongRenderReport renderSong(
                     *compiled.graph, registry, nodes::builtinImplementations(), voice.engine->config(), voice.engine->voices(),
                     voice.engine->parameterSmoothSeconds());
                 if (prepared.plan && !prepareAutomation(song, track, *graph, prepared.plan.get(), rate, voice.nodParameters, patchError))
-                    return finish(fail("unsupported-automation", patchError));
+                    return finish(fail(automationErrorCode(patchError), patchError));
                 if (voice.nodParameters.size() > 64) return finish(fail("automation-capacity", "at most 64 automation targets per track"));
                 voice.parameterBlock.reserve(static_cast<std::size_t>(options.blockSize) * voice.nodParameters.size());
                 if (!prepared.plan || !voice.engine->stage(std::move(prepared.plan)).accepted) {
                     return finish(fail("prepare-failed", prepared.message.empty() ? "failed to prepare the patch" : prepared.message));
                 }
                 }
+            }
             }
         }
         bool sustainDown[16]{};
@@ -969,6 +1028,16 @@ SongRenderReport renderSong(
         voices.push_back(std::move(voice));
     }
 
+    std::unique_ptr<SongMixer> router;
+    if(hasRouting(song)) {
+        router=std::make_unique<SongMixer>();std::string routeError;
+        if(!router->prepare(song,rate,options.blockSize,routeError,options.baseDirectory)) return finish(fail("mixer-prepare",routeError));
+    }
+    std::uint32_t exportLatency=router?router->latencySamples():0;
+    if(router) {
+        for(std::size_t index=0;index<voices.size();++index) exportLatency=std::max(exportLatency,router->trackLatency(index));
+        for(std::size_t index=0;index<song.buses.size();++index) exportLatency=std::max(exportLatency,router->busLatency(index));
+    }
     std::int64_t endSample = 0;
     const auto mappedEnd = sampleAtTick(song, endTick(song), rate);
     if (!mappedEnd) return finish(fail("sample-overflow", "song length does not fit in a sample index"));
@@ -1053,7 +1122,7 @@ SongRenderReport renderSong(
             request.arguments = {
                 utf8Path(tool->executable), utf8Path(voice.asset), voice.className.empty() ? "-" : voice.className, utf8Path(midiPath),
                 utf8Path(wavPath), std::to_string(rate), std::to_string(options.blockSize), std::to_string(budgetSeconds),
-                utf8Path(automationPath)};
+                utf8Path(automationPath),voice.pluginState.empty()?"-":utf8Path(voice.pluginState)};
         } else {
             request.arguments = {
                 utf8Path(tool->executable), "-q", "-ni", "-R", "0", "-C", "0", "-r", std::to_string(rate), "-T", "wav", "-O", "float", "-g", "1",
@@ -1082,7 +1151,7 @@ SongRenderReport renderSong(
     const auto musicalFrames = static_cast<std::uint64_t>(endSample);
     std::uint64_t targetFrames = musicalFrames + tailBudget;
     if (externalFrames > targetFrames) targetFrames = externalFrames;
-    if (targetFrames > (0xffffffffu - 36u) / 8u) {
+    if (targetFrames+exportLatency > (0xffffffffu - 36u) / 8u) {
         return finish(fail("riff-limit", "rendered audio exceeds the RIFF size limit"));
     }
 
@@ -1091,6 +1160,27 @@ SongRenderReport renderSong(
     auto mix = std::make_unique<runtime::WavStream>();
     if (!mix->open(mixOutput, rate, 2, ioError)) return finish(fail("output-io", ioError));
     std::vector<std::filesystem::path> committed;
+    struct ExtraStem {
+        std::unique_ptr<runtime::WavStream> writer;
+        StemReport report;
+        std::uint64_t hash{14695981039346656037ull};
+    };
+    std::vector<ExtraStem> dryStems, busStems;
+    if(router && writeStems) {
+        auto openExtra=[&](const std::filesystem::path& path,const std::string& id,const std::string& role,std::vector<ExtraStem>& extras) {
+            std::error_code ec;std::filesystem::create_directories(path.parent_path(),ec);
+            ExtraStem extra;extra.report.trackId=id;extra.report.path=utf8Path(path);extra.report.role=role;extra.report.adapter="mixer";
+            extra.writer=std::make_unique<runtime::WavStream>();
+            if(ec || !extra.writer->open(path,rate,2,ioError)) return false;
+            extras.push_back(std::move(extra));return true;
+        };
+        for(const auto& voice:voices) if(!openExtra(stemsDirectory/"dry"/(voice.trackId+".wav"),voice.trackId,"dry-track",dryStems)) return finish(fail("output-io",ioError));
+        for(const auto& bus:song.buses) {
+            if(!safeTrackId(bus.id)) return finish(fail("invalid-song","bus id cannot be used as a stem name"));
+            if(!openExtra(stemsDirectory/(bus.isReturn?"returns":"buses")/(bus.id+".wav"),bus.id,bus.isReturn?"wet-return":"bus",busStems)) return finish(fail("output-io",ioError));
+            busStems.back().report.latencySamples=router->busLatency(busStems.size()-1);
+        }
+    }
     for (auto& voice : voices) {
         if (writeStems) {
             voice.stem = std::make_unique<runtime::WavStream>();
@@ -1133,6 +1223,7 @@ SongRenderReport renderSong(
     std::vector<float> mixed(static_cast<std::size_t>(options.blockSize) * 2, 0.f);
     std::uint64_t mixContentHash = 14695981039346656037ull;
     float mixPeak = 0.f;
+    bool processingFlush=false;
     const auto renderChunk = [&](std::uint64_t rendered, std::uint32_t chunk) {
         std::fill(mixed.begin(), mixed.begin() + static_cast<std::size_t>(chunk) * 2, 0.f);
         float blockPeak = 0.f;
@@ -1159,6 +1250,8 @@ SongRenderReport renderSong(
                     left[frame] = voice.external[voice.externalCursor++];
                     right[frame] = voice.external[voice.externalCursor++];
                 }
+            } else if (voice.sampler) {
+                voice.sampler->process(left.data(), right.data(), chunk, block);
             } else if (voice.engine) {
                 voice.parameterBlock.clear();
                 for (std::uint32_t frame = 0; frame < chunk; ++frame)
@@ -1169,20 +1262,39 @@ SongRenderReport renderSong(
                 voice.engine->reclaim();
             }
             const auto mixStarted = now();
+            for(std::uint32_t frame=0;frame<chunk;++frame) if(!std::isfinite(left[frame]) || !std::isfinite(right[frame])) {
+                ioError="nonfinite-audio: track "+voice.trackId+" produced NaN/Inf";return -1.f;
+            }
             chunkDsp += msBetween(dspStarted, mixStarted);
             if (!voice.cachedDry) voice.dspMs += msBetween(dspStarted, mixStarted);
-            if (voice.dry) {
+            if (voice.dry && !processingFlush) {
                 for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                     stem[static_cast<std::size_t>(frame) * 2] = left[frame];
                     stem[static_cast<std::size_t>(frame) * 2 + 1] = right[frame];
                 }
                 if (!voice.dry->write(stem.data(), static_cast<std::size_t>(chunk) * 2, ioError)) return -1.f;
             }
+            if(router) {
+                const auto index=static_cast<std::size_t>(&voice-voices.data());
+                router->setTrackInput(index,left.data(),right.data(),chunk);
+                if(!dryStems.empty()) {
+                    const auto keepBegin=std::max(rendered,emitFrom),keepEnd=std::min(rendered+chunk,emitUntil);
+                    if(keepEnd>keepBegin) {
+                        const auto first=static_cast<std::size_t>(keepBegin-rendered),count=static_cast<std::size_t>(keepEnd-keepBegin);
+                        for(std::size_t frame=0;frame<count;++frame) {stem[frame*2]=left[first+frame];stem[frame*2+1]=right[first+frame];}
+                        auto& extra=dryStems[index];
+                        for(std::size_t sample=0;sample<count*2;++sample) extra.report.peak=std::max(extra.report.peak,std::fabs(stem[sample]));
+                        extra.hash=mixHash(extra.hash,stem.data(),count*2);
+                        if(!extra.writer->write(stem.data(),count*2,ioError)) return -1.f;
+                    }
+                }
+                continue;
+            }
             for (std::uint32_t frame = 0; frame < chunk; ++frame) {
                 const auto sample = static_cast<std::int64_t>(rendered + frame);
                 float gainLeft = 0.f;
                 float gainRight = 0.f;
-                equalPower(gainAt(voice.automation, sample, voice.gain), voice.pan, gainLeft, gainRight);
+                voice.mix.gainsAt(sample, gainLeft, gainRight);
                 const float sampleLeft = left[frame] * gainLeft;
                 const float sampleRight = right[frame] * gainRight;
                 stem[static_cast<std::size_t>(frame) * 2] = sampleLeft;
@@ -1211,11 +1323,41 @@ SongRenderReport renderSong(
             }
             chunkWrite += msBetween(writeStarted, now());
         }
+        if(router) {
+            const auto mixStarted=now();router->process(static_cast<std::int64_t>(rendered),chunk,mixed.data());
+            if(const auto* reason=router->errorReason()) {ioError=reason;return -1.f;}
+            chunkMix+=msBetween(mixStarted,now());
+            const auto window=[&](std::uint32_t latency) {
+                const auto end=emitUntil==~std::uint64_t{0}?emitUntil:emitUntil+latency;
+                const auto begin=std::max(rendered,emitFrom+latency),stop=std::min(rendered+chunk,end);
+                return std::pair{static_cast<std::size_t>(begin-rendered),stop>begin?static_cast<std::size_t>(stop-begin):std::size_t{0}};
+            };
+            for(std::size_t index=0;index<voices.size();++index) {
+                const auto [first,count]=window(router->trackLatency(index));if(count) {
+                    auto& voice=voices[index];const auto* samples=router->trackOutput(index)+first*2;
+                    for(std::size_t sample=0;sample<count*2;++sample) voice.peak=std::max(voice.peak,std::fabs(samples[sample]));
+                    voice.hash=mixHash(voice.hash,samples,count*2);
+                    if(voice.stem && !voice.stem->write(samples,count*2,ioError)) return -1.f;
+                }
+            }
+            for(std::size_t index=0;index<busStems.size();++index) {
+                const auto [first,count]=window(router->busLatency(index));if(count) {
+                    auto& extra=busStems[index];const auto* samples=router->busOutput(index)+first*2;
+                    for(std::size_t sample=0;sample<count*2;++sample) extra.report.peak=std::max(extra.report.peak,std::fabs(samples[sample]));
+                    extra.hash=mixHash(extra.hash,samples,count*2);
+                    if(!extra.writer->write(samples,count*2,ioError)) return -1.f;
+                }
+            }
+        }
         const auto chunkBegin = rendered;
         const auto chunkEnd = rendered + chunk;
-        const auto keepBegin = std::max(chunkBegin, emitFrom);
-        const auto keepEnd = std::min(chunkEnd, emitUntil);
+        const auto masterLatency=router?router->latencySamples():0;
+        const auto keepBegin = std::max(chunkBegin, emitFrom+masterLatency);
+        const auto keepEnd = std::min(chunkEnd, emitUntil==~std::uint64_t{0}?emitUntil:emitUntil+masterLatency);
         const auto mixWriteStarted = now();
+        for(std::uint32_t sample=0;sample<chunk*2;++sample) if(!std::isfinite(mixed[sample])) {
+            ioError="nonfinite-audio: shared effect/mix produced NaN/Inf";return -1.f;
+        }
         if (keepEnd > keepBegin) {
             const auto first = static_cast<std::size_t>(keepBegin - chunkBegin);
             const auto count = static_cast<std::size_t>(keepEnd - keepBegin);
@@ -1246,6 +1388,8 @@ SongRenderReport renderSong(
 
     auto discard = [&]() {
         mix->abort();
+        for(auto& extra:dryStems) extra.writer->abort();
+        for(auto& extra:busStems) extra.writer->abort();
         for (auto& voice : voices) {
             if (voice.stem) voice.stem->abort();
             if (voice.dry) voice.dry->abort();
@@ -1253,11 +1397,19 @@ SongRenderReport renderSong(
         std::error_code ignored;
         for (const auto& path : committed) std::filesystem::remove(path, ignored);
     };
+    auto commitExtras=[&]() {
+        for(auto* extras:{&dryStems,&busStems}) for(auto& extra:*extras) {
+            if(!extra.writer->commit(ioError)) return false;
+            committed.push_back(resolveResourcePath({},extra.report.path));extra.report.hash=hex64(extra.hash);
+        }
+        return true;
+    };
 
     std::uint64_t rendered = 0;
     if (preview) {
-        while (rendered < emitUntil) {
-            const auto chunk = static_cast<std::uint32_t>(std::min<std::uint64_t>(options.blockSize, emitUntil - rendered));
+        const auto processUntil=emitUntil+exportLatency;
+        while (rendered < processUntil) {
+            const auto chunk = static_cast<std::uint32_t>(std::min<std::uint64_t>(options.blockSize, processUntil - rendered));
             if (renderChunk(rendered, chunk) < 0.f) {
                 discard();
                 return finish(fail("output-io", ioError));
@@ -1265,7 +1417,7 @@ SongRenderReport renderSong(
             rendered += chunk;
         }
         const auto previewEnd = emitUntil > tailBudget ? emitUntil - tailBudget : 0;
-        const auto previewTail = rendered > previewEnd ? rendered - previewEnd : 0;
+        const auto previewTail = emitUntil > previewEnd ? emitUntil - previewEnd : 0;
         const auto commitStarted = now();
         for (auto& voice : voices) {
             if (!voice.stem) continue;
@@ -1275,6 +1427,7 @@ SongRenderReport renderSong(
             }
             committed.push_back(voice.stemPath);
         }
+        if(!commitExtras()) {discard();return finish(fail("output-io",ioError));}
         if (!mix->commit(ioError)) {
             discard();
             return finish(fail("output-io", ioError));
@@ -1293,6 +1446,12 @@ SongRenderReport renderSong(
         report.mixHash = hex64(mixContentHash);
         report.message = "rendered";
         report.diagnostics = song.diagnostics;
+        if(router) {
+            report.latencySamples=router->latencySamples();report.mixerCommittedBytes=router->committedBytes();report.declaredEffectTailSeconds=router->tailSeconds();
+            report.effects=router->effectReport(song,options.freezeExternal);
+            report.tailTruncated=report.tailFrames<router->tailSeconds()*rate;
+            for(auto* extras:{&dryStems,&busStems}) for(auto& extra:*extras) report.stems.push_back(std::move(extra.report));
+        }
         for (const auto& voice : voices) {
             StemReport stem;
             stem.trackId = voice.trackId;
@@ -1300,7 +1459,7 @@ SongRenderReport renderSong(
             stem.hash = hex64(voice.hash);
             stem.peak = voice.peak;
             stem.adapter = voice.adapter;
-            stem.latencySamples = voice.latencySamples;
+            stem.latencySamples = voice.latencySamples+(router?router->trackLatency(static_cast<std::size_t>(&voice-voices.data())):0);
             report.stems.push_back(std::move(stem));
         }
         return finish(std::move(report));
@@ -1344,11 +1503,21 @@ SongRenderReport renderSong(
                 discard();
                 return finish(fail("output-io", ioError));
             }
-            hot = peak >= static_cast<float>(options.tailThreshold);
+            hot = peak >= static_cast<float>(options.tailThreshold) || (router && (tailFrames+chunk)<router->tailSeconds()*rate+exportLatency);
             rendered += chunk;
             tailFrames += chunk;
         }
         tailTruncated = hot && tailFrames >= tailBudget;
+    }
+    if(router && exportLatency) {
+        emitUntil=rendered;
+        processingFlush=true;
+        const auto flushUntil=rendered+exportLatency;
+        while(rendered<flushUntil) {
+            const auto chunk=static_cast<std::uint32_t>(std::min<std::uint64_t>(options.blockSize,flushUntil-rendered));
+            if(renderChunk(rendered,chunk)<0) {discard();return finish(fail("output-io",ioError));}
+            rendered+=chunk;
+        }
     }
     const auto commitStarted = now();
     for (auto& voice : voices) {
@@ -1366,6 +1535,7 @@ SongRenderReport renderSong(
             }
         }
     }
+    if(!commitExtras()) {discard();return finish(fail("output-io",ioError));}
     if (!mix->commit(ioError)) {
         discard();
         return finish(fail("output-io", ioError));
@@ -1382,10 +1552,19 @@ SongRenderReport renderSong(
     report.originSample = emitFrom;
     report.tailFrames = tailFrames;
     report.tailTruncated = tailTruncated;
+    if(router) {
+        report.latencySamples=router->latencySamples();report.mixerCommittedBytes=router->committedBytes();report.declaredEffectTailSeconds=router->tailSeconds();
+        report.effects=router->effectReport(song,options.freezeExternal);
+        if(report.tailFrames<router->tailSeconds()*rate) {
+            report.tailTruncated=true;
+            report.diagnostics.push_back({"effect-tail-budget","requested tail is shorter than the conservative effect-tail bound; increase tail budget for complete decay"});
+        }
+        for(auto* extras:{&dryStems,&busStems}) for(auto& extra:*extras) report.stems.push_back(std::move(extra.report));
+    }
     report.peak = mixPeak;
     report.mixHash = hex64(mixContentHash);
     report.message = "rendered";
-    report.diagnostics = song.diagnostics;
+    report.diagnostics.insert(report.diagnostics.end(),song.diagnostics.begin(),song.diagnostics.end());
     if (options.mode == midi::RenderMode::loose) {
         for (const auto& event : song.preserved) {
             if (!event.affectsSound) continue;
@@ -1400,7 +1579,7 @@ SongRenderReport renderSong(
         stem.hash = hex64(voice.hash);
         stem.peak = voice.peak;
         stem.adapter = voice.adapter;
-        stem.latencySamples = voice.latencySamples;
+        stem.latencySamples = voice.latencySamples+(router?router->trackLatency(static_cast<std::size_t>(&voice-voices.data())):0);
         stem.cacheHit = voice.cachedDry;
         stem.dspMs = voice.dspMs;
         if (voice.adapter == "fluidsynth") {
@@ -1412,9 +1591,11 @@ SongRenderReport renderSong(
     if (options.useCache && !preview) {
         std::error_code failure;
         std::filesystem::create_directories(cachedMix.parent_path(), failure);
-        if (!failure) {
+        if (!failure && cacheMix) {
             std::filesystem::copy_file(mixOutput, cachedMix, std::filesystem::copy_options::overwrite_existing, failure);
             if (!failure) {
+                std::ofstream metadata(cachedMix.parent_path()/"effects.json",std::ios::binary);
+                metadata<<report.effects.dump(-1);
                 report.cacheHit = false;
                 report.cacheReason = "stored-finished-mix";
             }

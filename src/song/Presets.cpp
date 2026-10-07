@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cctype>
+#include <sstream>
 #include <utility>
 
 #include <nodsynth/midi/Smf.h>
 #include <nodsynth/render/OfflineRenderer.h>
 #include <nodsynth/song/AudioExport.h>
 #include <nodsynth/song/Automation.h>
+#include <nodsynth/persist/ProjectFile.h>
 
 namespace nodsynth::song {
 namespace {
@@ -44,6 +47,15 @@ const CatalogEntry kCatalog[] = {
     {"trance-pad", 1, "pad", "Trance Saw Pad", kTranceTags, 2, "trance-pad.json"},
     {"house-bass", 1, "bass", "House Square Bass", kHouseTags, 2, "house-bass.json"},
     {"house-chord", 1, "pad", "House Chord Stab", kHouseTags, 2, "house-chord.json"},
+    {"stereo-unison-lead", 2, "lead", "Stereo Unison Lead", kLeadTags, 3, "stereo-unison-lead.json"},
+    {"stereo-unison-pad", 2, "pad", "Stereo Unison Pad", kPadTags, 3, "stereo-unison-pad.json"},
+    {"production-lead",1,"lead","Production Stereo Lead",kLeadTags,3,"production-roles/production-lead.json"},
+    {"production-pad",1,"pad","Production Stereo Pad",kPadTags,3,"production-roles/production-pad.json"},
+    {"production-pluck",1,"pluck","Production Pluck",kLeadTags,3,"production-roles/production-pluck.json"},
+    {"production-offbeat-bass",1,"bass","Production Offbeat Bass",kBassTags,2,"production-roles/production-offbeat-bass.json"},
+    {"production-sub",1,"sub","Production Mono Sub",kBassTags,2,"production-roles/production-sub.json"},
+    {"production-riser",1,"riser","Production Riser",kTranceTags,2,"production-roles/production-riser.json"},
+    {"production-impact",1,"impact","Production Impact",kTranceTags,2,"production-roles/production-impact.json"},
 };
 
 PresetInfo fromEntry(const CatalogEntry& entry, const std::filesystem::path& presetsRoot) {
@@ -57,6 +69,8 @@ PresetInfo fromEntry(const CatalogEntry& entry, const std::filesystem::path& pre
     info.hash = hashFile(presetsRoot / entry.file);
     std::string error;
     if (auto graph = render::loadPatch(presetsRoot / entry.file, error)) info.parameters = parametersJson(*graph);
+    if(auto project=persist::loadProject(presetsRoot/entry.file,error))
+        if(const auto* metadata=project->root.find("production")) info.production=*metadata;
     return info;
 }
 
@@ -131,6 +145,7 @@ persist::Json presetJson(const PresetInfo& info) {
     json.set("patchPath", persist::Json::string(storedPatchPath(info)));
     json.set("hash", persist::Json::string(info.hash));
     json.set("parameters", info.parameters);
+    json.set("production",info.production);
     json.set("dependencies", persist::Json::array());
     json.set("auditionStatus", persist::Json::string("unheard"));
     json.set("levelPolicy", persist::Json::string("patch levels reserve headroom; use representative audition to measure actual peak"));
@@ -144,6 +159,23 @@ persist::Json listJson(const std::vector<PresetInfo>& presets) {
     json.set("presets", std::move(items));
     json.set("count", persist::Json::number(static_cast<double>(presets.size())));
     return json;
+}
+
+std::vector<PresetInfo> searchPresets(const std::filesystem::path& root,std::string_view text,std::optional<std::string> role) {
+    auto lower=[](std::string value) {
+        for (auto& c:value) c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return value;
+    };
+    std::vector<std::string> terms;std::istringstream words(lower(std::string(text)));std::string term;
+    while (words>>term) terms.push_back(term);
+    auto presets=listPresets(root,std::move(role));
+    std::erase_if(presets,[&](const auto& preset) {
+        std::string content=preset.id+" "+preset.role+" "+preset.name;
+        for (const auto& tag:preset.tags) content+=" "+tag;
+        content=lower(std::move(content));
+        return std::any_of(terms.begin(),terms.end(),[&](const auto& value){return content.find(value)==std::string::npos;});
+    });
+    return presets;
 }
 
 bool bindPreset(

@@ -1,7 +1,10 @@
 #include <nodsynth/song/SongDocument.h>
+#include <nodsynth/song/Sampler.h>
+#include <nodsynth/song/Mixer.h>
 #include <nodsynth/song/Presets.h>
 #include <nodsynth/song/Phrases.h>
 #include <nodsynth/song/Automation.h>
+#include <nodsynth/song/Workflow.h>
 
 #include <algorithm>
 #include <cmath>
@@ -69,6 +72,20 @@ bool readU32(const persist::Json* value, std::uint32_t& out) {
     return std::fabs(number - static_cast<double>(out)) <= 1e-6;
 }
 
+bool readIntervals(const persist::Json* value, std::vector<TickInterval>& intervals, std::string& error) {
+    if (!value) return true;
+    if (value->kind() != persist::Json::Kind::array) { error = "intervals must be an array"; return false; }
+    for (const auto& item : value->asArray()) {
+        TickInterval interval;
+        if (!readU32(item.find("startTick"), interval.startTick) || !readU32(item.find("endTick"), interval.endTick) ||
+            interval.startTick >= interval.endTick || (!intervals.empty() && interval.startTick <= intervals.back().endTick)) {
+            error = "intervals must be sorted, nonempty and disjoint (merge touching intervals)"; return false;
+        }
+        intervals.push_back(interval);
+    }
+    return true;
+}
+
 bool readU16(const persist::Json* value, std::uint16_t& out) {
     std::uint32_t wide = 0;
     if (!readU32(value, wide) || wide > 65535) return false;
@@ -88,6 +105,7 @@ const char* kindName(InstrumentKind kind) {
     case InstrumentKind::nodsynth: return "nodsynth";
     case InstrumentKind::externalCli: return "external-cli";
     case InstrumentKind::vst3: return "vst3";
+    case InstrumentKind::sampler: return "sampler";
     }
     return "nodsynth";
 }
@@ -96,6 +114,7 @@ std::optional<InstrumentKind> kindFromName(const std::string& name) {
     if (name == "nodsynth") return InstrumentKind::nodsynth;
     if (name == "external-cli") return InstrumentKind::externalCli;
     if (name == "vst3") return InstrumentKind::vst3;
+    if (name == "sampler") return InstrumentKind::sampler;
     return std::nullopt;
 }
 
@@ -181,9 +200,138 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
         return false;
     }
     const auto name = op->asString();
-    if (name == "add-pattern" || name == "transpose-notes" || name == "scale-velocities" || name == "add-pump")
+    if (name == "set-role" || name == "set-section" || name == "delete-section" || name == "repeat-phrase")
+        return applyWorkflow(song, command, idMap, error);
+    if (name == "add-pattern" || name == "transpose-notes" || name == "scale-velocities" || name == "add-pump" || name == "set-audio-mute")
         return applyPhrase(song, command, idMap, error);
+    if (name == "set-mix-mode" || name == "clear-pump") {
+        const auto* id = command.find("track");
+        auto* track = id ? findTrack(song, id->asString()) : nullptr;
+        if (!track) { error = "track was not found"; return false; }
+        if (name == "clear-pump") { track->pump.reset(); return true; }
+        if (const auto* mode = command.find("gainMode")) {
+            if (mode->asString() != "legacy" && mode->asString() != "multiply") { error = "gainMode must be legacy or multiply"; return false; }
+            track->gainMode = mode->asString();
+        }
+        if (const auto* mode = command.find("panMode")) {
+            if (mode->asString() != "equal-power" && mode->asString() != "balance") { error = "panMode must be equal-power or balance"; return false; }
+            track->panMode = mode->asString();
+        }
+        return true;
+    }
     if (name == "collect-resources") return true;
+    if(name=="set-effect-automation") {
+        const auto* target=command.find("target");const auto* effectId=command.find("effect");const auto* parameter=command.find("parameter");const auto* points=command.find("points");
+        if(!target || !effectId || !parameter || !points) {error="set-effect-automation requires target, effect, parameter and points";return false;}
+        std::vector<effects::Config>* inserts=nullptr;
+        if(target->asString()=="master") inserts=&song.masterInserts;
+        else if(auto* track=findTrack(song,target->asString())) inserts=&track->inserts;
+        else for(auto& bus:song.buses) if(bus.id==target->asString()) inserts=&bus.inserts;
+        if(!inserts) {error="effect automation routing target was not found";return false;}
+        const auto effect=std::find_if(inserts->begin(),inserts->end(),[&](const auto& e){return e.id==effectId->asString();});
+        if(effect==inserts->end()) {error="effect id was not found";return false;}
+        auto item=effectsJson({*effect}).asArray()[0],automation=persist::Json::array();
+        for(const auto& entry:item.find("automation")->asArray()) if(entry.find("parameter")->asString()!=parameter->asString()) automation.push(entry);
+        auto lane=persist::Json::object();lane.set("parameter",*parameter);lane.set("points",*points);
+        lane.set("interpolation",command.find("interpolation")?*command.find("interpolation"):persist::Json::string("linear"));
+        automation.push(std::move(lane));item.set("automation",std::move(automation));
+        auto array=persist::Json::array();array.push(std::move(item));std::vector<effects::Config> parsed;
+        if(!parseEffects(array,parsed,error)) return false;*effect=std::move(parsed.front());return true;
+    }
+    if (name == "create-bus") {
+        auto document = persist::Json::object(), buses = persist::Json::array(); buses.push(command); document.set("buses",std::move(buses));
+        SongDocument parsed; if(!parseRouting(document,parsed,error)) return false;
+        song.buses.push_back(std::move(parsed.buses.front())); return true;
+    }
+    if (name == "set-inserts" || name == "set-sends" || name == "set-output" || name == "set-bus") {
+        const auto* target=command.find("target"); if(!target) {error="routing edit requires target";return false;}
+        const auto id=target->asString();
+        auto* track=findTrack(song,id);
+        auto bus=std::find_if(song.buses.begin(),song.buses.end(),[&](const auto& b){return b.id==id;});
+        const bool master=id=="master";
+        if(!track && bus==song.buses.end() && !master) {error="routing target was not found";return false;}
+        if(name=="set-inserts") {
+            const auto* value=command.find("inserts"); if(!value) {error="set-inserts requires inserts";return false;}
+            auto& inserts=master?song.masterInserts:(track?track->inserts:bus->inserts);
+            return parseEffects(*value,inserts,error);
+        }
+        if(master) {error="master supports set-inserts only";return false;}
+        if(name=="set-sends") {
+            const auto* value=command.find("sends"); if(!value) {error="set-sends requires sends";return false;}
+            return parseSends(*value,track?track->sends:bus->sends,error);
+        }
+        if(name=="set-output") {
+            const auto* value=command.find("output"); if(!value || value->kind()!=persist::Json::Kind::string) {error="set-output requires output string (empty disconnects direct output)";return false;}
+            (track?track->output:bus->output)=value->asString();return true;
+        }
+        if(bus==song.buses.end()) {error="set-bus target must be a bus/return";return false;}
+        if(const auto* gain=command.find("gain")) if(!finiteNumber(gain,bus->gain)) {error="bus gain must be finite";return false;}
+        if(const auto* pan=command.find("pan")) if(!finiteNumber(pan,bus->pan)) {error="bus pan must be finite";return false;}
+        if(const auto* mute=command.find("mute")) {if(mute->kind()!=persist::Json::Kind::boolean) {error="bus mute must be boolean";return false;}bus->mute=mute->asBool();}
+        if(const auto* label=command.find("name")) bus->name=label->asString();return true;
+    }
+    if (name == "bind-sample-kit") {
+        const auto* track = command.find("track"); const auto* kit = command.find("kit");
+        if (!track || !kit) { error = "bind-sample-kit requires track and kit"; return false; }
+        return bindSampleKit(song, track->asString(), resolveResourcePath(song.baseDirectory, kit->asString()), error);
+    }
+    if (name == "add-plugin-resource" || name == "add-plugin-state") {
+        const auto* path = command.find("path");
+        if (!path || path->kind() != persist::Json::Kind::string || path->asString().empty()) {
+            error = name + " requires path"; return false;
+        }
+        Resource resource;
+        resource.kind = name == "add-plugin-state" ? "plugin-state" : "vst3-plugin";
+        resource.id = command.find("id") ? command.find("id")->asString() : freshId(song, resource.kind.c_str());
+        resource.path = path->asString();
+        resource.hash = hashFile(resolveResourcePath(song.baseDirectory, resource.path));
+        if (resource.hash.empty()) { error = "plugin binary or state is missing or unreadable"; return false; }
+        if (const auto* source = command.find("source")) resource.source = source->asString();
+        if (const auto* license = command.find("license")) resource.license = license->asString();
+        song.resources.push_back(std::move(resource)); return true;
+    }
+    if (name == "add-sample-resource") {
+        const auto* path = command.find("path");
+        const auto* license = command.find("license");
+        const auto* source = command.find("source");
+        if (!path || path->kind() != persist::Json::Kind::string || !license || license->asString().empty() || !source || source->asString().empty()) {
+            error = "add-sample-resource requires path, license and source"; return false;
+        }
+        Resource resource;
+        resource.id = command.find("id") ? command.find("id")->asString() : freshId(song, "sample");
+        resource.path = path->asString(); resource.kind = "sample";
+        resource.hash = hashFile(resolveResourcePath(song.baseDirectory, resource.path));
+        if (resource.hash.empty()) { error = "sample is missing or unreadable"; return false; }
+        resource.license = license->asString(); resource.source = source->asString();
+        song.resources.push_back(std::move(resource)); return true;
+    }
+    if (name == "set-sampler") {
+        const auto* trackId = command.find("track");
+        auto* track = trackId ? findTrack(song, trackId->asString()) : nullptr;
+        const auto* samples = command.find("samples");
+        if (!track || !samples) { error = "set-sampler requires track and samples"; return false; }
+        Instrument instrument;
+        instrument.kind = InstrumentKind::sampler;
+        instrument.adapter = "sampler-v1";
+        instrument.name = command.find("name") ? command.find("name")->asString() : "One-shot sampler";
+        if (!parseSampleLayers(*samples, instrument.samples, error) || !validateSampleLayers(instrument, song, error)) return false;
+        instrument.id = freshId(song, "instrument");
+        track->instrumentId = instrument.id;
+        song.instruments.push_back(std::move(instrument));
+        return true;
+    }
+    if (name == "set-vst3-instrument") {
+        const auto* trackId=command.find("track");const auto* resourceId=command.find("pluginResource");const auto* className=command.find("className");
+        auto* track=trackId?findTrack(song,trackId->asString()):nullptr;
+        if(!track || !resourceId || !className || className->asString().empty()) {error="set-vst3-instrument requires track, pluginResource and className";return false;}
+        const auto resource=std::find_if(song.resources.begin(),song.resources.end(),[&](const auto& item){return item.id==resourceId->asString();});
+        if(resource==song.resources.end() || resource->kind!="vst3-plugin" || resource->hash.empty()) {error="VST3 instrument requires a hashed plugin resource";return false;}
+        Instrument instrument;instrument.id=freshId(song,"instrument");instrument.kind=InstrumentKind::vst3;
+        instrument.resourceId=resource->id;instrument.name=className->asString();instrument.adapter="vst3";
+        if(const auto* state=command.find("stateResource")) instrument.stateResourceId=state->asString();
+        if(const auto* clear=command.find("clearAutomation");clear && clear->asBool()) {track->parameterValues.clear();track->parameterAutomation.clear();}
+        track->instrumentId=instrument.id;song.instruments.push_back(std::move(instrument));return true;
+    }
     if (name == "set-instrument") {
         const auto* trackId = command.find("track");
         const auto* patch = command.find("patch");
@@ -422,6 +570,7 @@ bool applyOne(SongDocument& song, const persist::Json& command, std::string& err
     }
     if (name == "create-track") {
         Track track;
+        track.gainMode = "multiply";
         const auto* id = command.find("id");
         track.id = id != nullptr && id->kind() == persist::Json::Kind::string && !id->asString().empty() ? id->asString()
                                                                                                        : freshId(song, "track");
@@ -757,6 +906,15 @@ persist::Json toJson(const SongDocument& song) {
     json.set("formatVersion", persist::Json::number(song.version));
     json.set("revision", persist::Json::number(static_cast<double>(song.revision)));
     json.set("ppq", persist::Json::number(song.ppq));
+    if (!song.sections.empty()) {
+        auto sections=persist::Json::array();
+        for (const auto& section:song.sections) {
+            auto item=persist::Json::object();item.set("id",persist::Json::string(section.id));
+            item.set("name",persist::Json::string(section.name));item.set("startTick",persist::Json::number(section.startTick));
+            item.set("endTick",persist::Json::number(section.endTick));sections.push(std::move(item));
+        }
+        json.set("sections",std::move(sections));
+    }
     if (song.songRangeEndTick) json.set("songRangeEndTick", persist::Json::number(*song.songRangeEndTick));
     if (!song.sourceMidiHash.empty()) json.set("sourceMidiHash", persist::Json::string(song.sourceMidiHash));
     persist::Json tempo = persist::Json::array();
@@ -783,6 +941,8 @@ persist::Json toJson(const SongDocument& song) {
         item.set("path", persist::Json::string(resource.path));
         item.set("hash", persist::Json::string(resource.hash));
         item.set("kind", persist::Json::string(resource.kind));
+        if (!resource.license.empty()) item.set("license", persist::Json::string(resource.license));
+        if (!resource.source.empty()) item.set("source", persist::Json::string(resource.source));
         if (!resource.presetId.empty()) {
             item.set("presetId", persist::Json::string(resource.presetId));
             item.set("presetVersion", persist::Json::number(resource.presetVersion));
@@ -796,8 +956,10 @@ persist::Json toJson(const SongDocument& song) {
         item.set("id", persist::Json::string(instrument.id));
         item.set("kind", persist::Json::string(kindName(instrument.kind)));
         item.set("resource", persist::Json::string(instrument.resourceId));
+        if(!instrument.stateResourceId.empty()) item.set("stateResource",persist::Json::string(instrument.stateResourceId));
         item.set("name", persist::Json::string(instrument.name));
         if (!instrument.adapter.empty()) item.set("adapter", persist::Json::string(instrument.adapter));
+        if (instrument.kind == InstrumentKind::sampler) item.set("samples", sampleLayersJson(instrument.samples));
         instruments.push(std::move(item));
     }
     json.set("instruments", std::move(instruments));
@@ -806,10 +968,14 @@ persist::Json toJson(const SongDocument& song) {
         persist::Json item = persist::Json::object();
         item.set("id", persist::Json::string(track.id));
         item.set("name", persist::Json::string(track.name));
+        if (!track.role.empty()) item.set("role",persist::Json::string(track.role));
         item.set("instrument", persist::Json::string(track.instrumentId));
         item.set("gain", persist::Json::number(track.gain));
         item.set("pan", persist::Json::number(track.pan));
         item.set("order", persist::Json::number(track.order));
+        item.set("output", persist::Json::string(track.output));
+        item.set("inserts", effectsJson(track.inserts));
+        item.set("sends", sendsJson(track.sends));
         if (track.sourceTrack) item.set("sourceTrack", persist::Json::number(*track.sourceTrack));
         if (track.sourceChannel) item.set("sourceChannel", persist::Json::number(*track.sourceChannel));
         persist::Json clips = persist::Json::array();
@@ -841,6 +1007,8 @@ persist::Json toJson(const SongDocument& song) {
             automation.push(std::move(pointJson));
         }
         item.set("gainAutomation", std::move(automation));
+        const auto controls = mixControlsJson(track);
+        for (const auto& [field, value] : controls.items()) item.set(field, value);
         auto baseParameters = persist::Json::object();
         for (const auto& [id, value] : track.parameterValues) baseParameters.set(id, persist::Json::number(value));
         item.set("parameterValues", std::move(baseParameters));
@@ -876,6 +1044,8 @@ persist::Json toJson(const SongDocument& song) {
         tracks.push(std::move(item));
     }
     json.set("tracks", std::move(tracks));
+    const auto routing=routingJson(song);
+    for(const auto& [key,value]:routing.items()) json.set(key,value);
     persist::Json preserved = persist::Json::array();
     for (const auto& event : song.preserved) {
         persist::Json item = persist::Json::object();
@@ -928,6 +1098,18 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
     }
     SongDocument song;
     song.version = kSongFormatVersion;
+    if (const auto* sections=json.find("sections")) {
+        if (sections->kind()!=persist::Json::Kind::array) {error="sections must be an array";return std::nullopt;}
+        for (const auto& item:sections->asArray()) {
+            Section section;const auto* id=item.find("id");const auto* name=item.find("name");
+            if (!id || id->kind()!=persist::Json::Kind::string || (name && name->kind()!=persist::Json::Kind::string) ||
+                !readU32(item.find("startTick"),section.startTick) || !readU32(item.find("endTick"),section.endTick)) {
+                error="invalid section";return std::nullopt;
+            }
+            section.id=id->asString();section.name=name?name->asString():section.id;song.sections.push_back(std::move(section));
+        }
+    }
+    if(!parseRouting(json,song,error)) return std::nullopt;
     std::uint32_t revision = 1;
     if (const auto* value = json.find("revision"); value != nullptr && !readU32(value, revision)) {
         error = "song revision is invalid";
@@ -1007,6 +1189,8 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
             if (const auto* preset = item.find("presetId")) resource.presetId = preset->asString();
             if (const auto* version = item.find("presetVersion")) resource.presetVersion = static_cast<int>(version->asNumber());
             if (const auto* kind = item.find("kind"); kind != nullptr && !kind->asString().empty()) resource.kind = kind->asString();
+            if (const auto* license = item.find("license")) resource.license = license->asString();
+            if (const auto* source = item.find("source")) resource.source = source->asString();
             song.resources.push_back(std::move(resource));
             return true;
         })) {
@@ -1028,8 +1212,13 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
             instrument.id = id->asString();
             instrument.kind = *parsed;
             if (const auto* resource = item.find("resource")) instrument.resourceId = resource->asString();
+            if(const auto* state=item.find("stateResource")) instrument.stateResourceId=state->asString();
             if (const auto* name = item.find("name")) instrument.name = name->asString();
             if (const auto* adapter = item.find("adapter")) instrument.adapter = adapter->asString();
+            if (instrument.kind == InstrumentKind::sampler) {
+                const auto* samples = item.find("samples");
+                if (!samples || !parseSampleLayers(*samples, instrument.samples, error)) return false;
+            }
             song.instruments.push_back(std::move(instrument));
             return true;
         })) {
@@ -1043,8 +1232,15 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                 return false;
             }
             track.id = id->asString();
+            if (const auto* role=item.find("role")) {
+                if (role->kind()!=persist::Json::Kind::string) {error="track role must be a string";return false;}
+                track.role=role->asString();
+            }
             if (const auto* name = item.find("name")) track.name = name->asString();
             if (const auto* instrument = item.find("instrument")) track.instrumentId = instrument->asString();
+            if(const auto* output=item.find("output")) track.output=output->asString();
+            if(const auto* inserts=item.find("inserts")) if(!parseEffects(*inserts,track.inserts,error)) return false;
+            if(const auto* sends=item.find("sends")) if(!parseSends(*sends,track.sends,error)) return false;
             double gain = 1;
             double pan = 0;
             if (const auto* value = item.find("gain"); value != nullptr && (!finiteNumber(value, gain) || gain < 0.0)) {
@@ -1141,6 +1337,21 @@ std::optional<SongDocument> songFromJson(const persist::Json& json, std::string&
                     point.gain = value;
                     track.gainAutomation.push_back(point);
                 }
+            }
+            if (const auto* mode = item.find("gainMode")) track.gainMode = mode->asString();
+            if (const auto* mode = item.find("panMode")) track.panMode = mode->asString();
+            if (const auto* fade = item.find("muteFadeMs"))
+                if (!finiteNumber(fade, track.muteFadeMs)) { error = "muteFadeMs must be finite"; return false; }
+            if (!readIntervals(item.find("muteIntervals"), track.mute, error)) return false;
+            if (const auto* value = item.find("pump"); value && !value->isNull()) {
+                Pump pump;
+                if (!readU32(value->find("startTick"), pump.startTick) || !readU32(value->find("endTick"), pump.endTick) ||
+                    !readU32(value->find("period"), pump.period) || !readU32(value->find("recovery"), pump.recovery) ||
+                    !finiteNumber(value->find("depth"), pump.depth)) { error = "invalid pump"; return false; }
+                if (const auto* fade = value->find("fadeMs"))
+                    if (!finiteNumber(fade, pump.fadeMs)) { error = "pump fadeMs must be finite"; return false; }
+                if (!readIntervals(value->find("skipIntervals"), pump.skip, error)) return false;
+                track.pump = std::move(pump);
             }
             if (const auto* values = item.find("parameterValues")) {
                 if (values->kind() != persist::Json::Kind::object) { error = "parameterValues must be an object"; return false; }
@@ -1319,7 +1530,8 @@ bool saveSong(const std::filesystem::path& path, const SongDocument& song, std::
                 const auto source = resolveResourcePath(song.baseDirectory, resource.path);
                 const bool collected = !resource.hash.empty() &&
                     (resource.path == "assets/presets/" + resource.hash + ".json" ||
-                     resource.path == "assets/audio/" + resource.hash + ".sf2" || resource.path == "assets/audio/" + resource.hash + ".wav");
+                     resource.path == "assets/audio/" + resource.hash + ".sf2" || resource.path == "assets/audio/" + resource.hash + ".wav" ||
+                     resource.path == "assets/plugin-state/" + resource.hash + ".bin");
                 if (collected) {
                     const auto target = resolveResourcePath(destination, resource.path);
                     if (hashFile(target) != resource.hash) {
@@ -1390,9 +1602,25 @@ Validation validateDocument(const SongDocument& song) {
         }
     }
     std::vector<std::string> ids;
+    for (const auto& section:song.sections) {
+        addUnique(ids,section.id,"section",result);
+        if (section.startTick>=section.endTick) result.diagnostics.push_back({"section-range","section end must follow start",section.startTick,-1,section.id});
+    }
+    for(const auto& bus:song.buses) addUnique(ids,bus.id,"bus",result);
+    std::string routeError;
+    if(!validateRouting(song,routeError)) result.diagnostics.push_back({"invalid-routing",routeError});
     for (const auto& resource : song.resources) addUnique(ids, resource.id, "resource", result);
     for (const auto& instrument : song.instruments) {
         addUnique(ids, instrument.id, "instrument", result);
+        if(!instrument.stateResourceId.empty()) {
+            const auto state=std::find_if(song.resources.begin(),song.resources.end(),[&](const auto& resource){return resource.id==instrument.stateResourceId;});
+            if(instrument.kind!=InstrumentKind::vst3 || state==song.resources.end() || state->kind!="plugin-state" || state->hash.empty())
+                result.diagnostics.push_back({"invalid-plugin-state","VST3 state requires a hashed plugin-state resource",0,-1,instrument.id});
+        }
+        if (instrument.kind == InstrumentKind::sampler) {
+            std::string error;
+            if (!validateSampleLayers(instrument, song, error)) result.diagnostics.push_back({"invalid-sampler", error, 0, -1, instrument.id});
+        }
         if (!instrument.resourceId.empty() &&
             std::none_of(song.resources.begin(), song.resources.end(), [&](const Resource& resource) {
                 return resource.id == instrument.resourceId;
@@ -1411,7 +1639,40 @@ Validation validateDocument(const SongDocument& song) {
             })) {
             result.diagnostics.push_back({"missing-instrument", "track instrument was not found", 0, -1, track.id});
         }
+        const auto sampler = std::find_if(song.instruments.begin(), song.instruments.end(), [&](const auto& instrument) {
+            return instrument.id == track.instrumentId && instrument.kind == InstrumentKind::sampler;
+        });
+        if (sampler != song.instruments.end()) {
+            for (const auto& clip : track.clips) for (const auto& note : clip.notes)
+                if (std::none_of(sampler->samples.begin(), sampler->samples.end(), [&](const auto& layer) {
+                    return note.pitch >= layer.lowNote && note.pitch <= layer.highNote && note.velocity >= layer.lowVelocity && note.velocity <= layer.highVelocity;
+                })) result.diagnostics.push_back({"sample-unmapped", "note/velocity has no sample layer", clip.startTick + note.tick, -1, note.id});
+            for (const auto& event : track.performance) if (event.kind == midi::EventKind::pitchBend)
+                result.diagnostics.push_back({"unsupported-event", "one-shot sampler tuning is fixed during prepare; pitch bend is unsupported", event.tick, -1, event.id});
+        }
         std::uint32_t previousGain = 0;
+        if ((track.gainMode != "legacy" && track.gainMode != "multiply") ||
+            (track.panMode != "equal-power" && track.panMode != "balance") ||
+            !std::isfinite(track.muteFadeMs) || track.muteFadeMs < 0 || track.muteFadeMs > 1000)
+            result.diagnostics.push_back({"mix", "invalid mix mode or mute fade", 0, -1, track.id});
+        const auto checkIntervals = [&](const std::vector<TickInterval>& intervals) {
+            std::uint32_t end = 0; bool first = true;
+            for (const auto& interval : intervals) {
+                if (interval.startTick >= interval.endTick || (!first && interval.startTick <= end))
+                    result.diagnostics.push_back({"mix", "intervals must be sorted, disjoint and nonempty", interval.startTick, -1, track.id});
+                end = interval.endTick; first = false;
+            }
+        };
+        checkIntervals(track.mute);
+        if (track.pump) {
+            const auto& pump = *track.pump;
+            if (!pump.period || !pump.recovery || pump.recovery >= pump.period || pump.startTick >= pump.endTick ||
+                (pump.period && (pump.endTick - pump.startTick) / pump.period > 100000) ||
+                !std::isfinite(pump.depth) || pump.depth < 0 || pump.depth > 1 ||
+                !std::isfinite(pump.fadeMs) || pump.fadeMs < 0 || pump.fadeMs > 1000)
+                result.diagnostics.push_back({"pump", "invalid pump timing, depth or fade", pump.startTick, -1, track.id});
+            checkIntervals(pump.skip);
+        }
         bool haveGain = false;
         for (const auto& point : track.gainAutomation) {
             if ((haveGain && point.tick < previousGain) || point.gain < 0.0 || !std::isfinite(point.gain)) {
@@ -1466,6 +1727,7 @@ Validation validateRenderReady(const SongDocument& song, const std::filesystem::
             std::string error;
             if (instrument == song.instruments.end()) error = "automation requires an instrument";
             else if (instrument->kind == InstrumentKind::externalCli) error = "external CLI backend does not support parameter automation";
+            else if (instrument->kind == InstrumentKind::sampler) error = "unsupported-target: sampler pitch banks are fixed during prepare; use sample layer configuration and track mix controls";
             else if (instrument->kind == InstrumentKind::vst3) {
                 if (!track.parameterValues.empty()) error = "VST3 base parameter overrides are not supported";
                 for (const auto& lane : track.parameterAutomation)
@@ -1479,7 +1741,7 @@ Validation validateRenderReady(const SongDocument& song, const std::filesystem::
                     if (graph) (void)prepareAutomation(song, track, *graph, nullptr, 48000, checked, error);
                 }
             }
-            if (!error.empty()) result.diagnostics.push_back({"unsupported-automation", error, 0, -1, track.id});
+            if (!error.empty()) result.diagnostics.push_back({automationErrorCode(error), error, 0, -1, track.id});
         }
     }
     result.ok = result.diagnostics.empty();
@@ -1637,10 +1899,12 @@ ApplyResult redoSong(SongDocument& song) {
     return result;
 }
 
-ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::optional<std::uint64_t> expectRevision, bool dryRun) {
+ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::optional<std::uint64_t> expectRevision, bool dryRun, SongDocument* preview) {
     ApplyResult result;
     result.revision = song.revision;
     result.baseRevision = song.revision;
+    if (preview==&song) {result.code="bad-command";result.message="preview must be a separate document";return result;}
+    if (preview) *preview=song;
     const auto* schema = batch.find("schemaVersion");
     std::uint32_t schemaVersion = 0;
     if (schema == nullptr || !readU32(schema, schemaVersion) || schemaVersion != 1) {
@@ -1673,6 +1937,12 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         result.revision = song.revision;
         return result;
     }
+    if (const auto* base=batch.find("baseRevision")) {
+        std::uint32_t revision=0;
+        if (!readU32(base,revision) || revision!=song.revision) {
+            result.code="revision-conflict";result.message="proposal baseRevision does not match the song";return result;
+        }
+    }
     const auto* commands = batch.find("commands");
     if (commands == nullptr || commands->kind() != persist::Json::Kind::array) {
         result.code = "bad-command";
@@ -1690,6 +1960,8 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
             return result;
         }
     }
+    // A preview resolves resources at their existing source locations, without copying assets.
+    const auto previewState=preview?std::optional<SongDocument>{next}:std::nullopt;
     struct Copy { std::filesystem::path source, target; std::string hash; };
     std::vector<Copy> copies;
     bool collectAll = false;
@@ -1702,16 +1974,19 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
             collectAll = true;
             includeAssets = command.find("includeAssets") && command.find("includeAssets")->asBool();
         }
-        if ((op->asString() == "bind-preset" || op->asString() == "set-instrument") && command.find("track") &&
+        if ((op->asString() == "bind-preset" || op->asString() == "set-instrument" || op->asString() == "set-sampler" || op->asString() == "bind-sample-kit") && command.find("track") &&
             !(command.find("externalReference") && command.find("externalReference")->asBool()))
             boundTracks.push_back(command.find("track")->asString());
     }
     for (auto& resource : next.resources) {
-        bool collect = collectAll && (resource.kind == "patch" || (includeAssets && (resource.kind == "soundfont" || resource.kind == "sample")));
+        bool collect = collectAll && (resource.kind == "patch" || resource.kind == "plugin-state" || (includeAssets && (resource.kind == "soundfont" || resource.kind == "sample")));
         for (const auto& track : next.tracks) {
             if (std::find(boundTracks.begin(), boundTracks.end(), track.id) == boundTracks.end()) continue;
-            for (const auto& instrument : next.instruments)
-                if (instrument.id == track.instrumentId && instrument.resourceId == resource.id) collect = true;
+            for (const auto& instrument : next.instruments) {
+                if (instrument.id != track.instrumentId) continue;
+                if (instrument.resourceId == resource.id) collect = true;
+                for (const auto& layer : instrument.samples) if (layer.resourceId == resource.id) collect = true;
+            }
         }
         if (!collect) continue;
         const auto source = resolveResourcePath(next.baseDirectory, resource.path);
@@ -1722,6 +1997,7 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         }
         // Content addresses contain only trusted hashes, never caller-provided filenames.
         const auto stored = resource.kind == "patch" ? std::string("assets/presets/") + actual + ".json"
+            : resource.kind == "plugin-state" ? std::string("assets/plugin-state/") + actual + ".bin"
             : std::string("assets/audio/") + actual + (resource.kind == "soundfont" ? ".sf2" : ".wav");
         const auto target = resolveResourcePath(next.baseDirectory, stored);
         copies.push_back({source, target, actual});
@@ -1735,6 +2011,7 @@ ApplyResult applyCommands(SongDocument& song, const persist::Json& batch, std::o
         return result;
     }
     const auto detail = batch.find("diffDetail") ? batch.find("diffDetail")->asString() : std::string("summary");
+    if (preview) *preview=*previewState;
     result.diff = semanticDiff(song, next, detail == "full", detail == "notes" || detail == "full");
     result.idMap = std::move(idMap);
     const auto* count = result.diff.find("changedEntityCount");
@@ -1832,6 +2109,7 @@ bool bindPatch(
     }
     instrument->kind = InstrumentKind::nodsynth;
     instrument->adapter.clear();
+    instrument->samples.clear();
     instrument->resourceId = resource->id;
     return true;
 }

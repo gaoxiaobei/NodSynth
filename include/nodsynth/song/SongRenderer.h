@@ -12,8 +12,8 @@
 #include <nodsynth/song/SongDocument.h>
 
 namespace nodsynth::song {
-// Equal-power pan. pan -1 is hard left, 0 is center (-3 dB each side), +1 is hard right.
-// Stem samples are post gain and pan. With no master effect, the mix is their sum.
+// equal-power: -3 dB per channel at center; balance: unity at center, attenuate opposite side.
+// Stems include fader, user lane, pump and audio mute. Their sum is the unprocessed master.
 struct SongRenderOptions {
     double sampleRate{48000.0};
     std::uint32_t blockSize{128};
@@ -39,6 +39,8 @@ struct SongRenderOptions {
     bool freezeExternal{false};
     std::string format{"float32"};
     std::string pcmOverflow{"reject"};
+    std::string dither{"none"};
+    std::uint32_t ditherSeed{1};
     std::filesystem::path previewOutput;
 };
 
@@ -51,6 +53,7 @@ struct StemReport {
     std::uint32_t latencySamples{0};
     bool cacheHit{false};
     double dspMs{0};
+    std::string role{"post-track"};
 };
 
 struct TimingBreakdown {
@@ -78,6 +81,10 @@ struct SongRenderReport {
     std::uint64_t originSample{0};
     std::uint64_t tailFrames{0};
     bool tailTruncated{false};
+    std::uint32_t latencySamples{0};
+    std::uint64_t mixerCommittedBytes{0};
+    double declaredEffectTailSeconds{0};
+    persist::Json effects{persist::Json::array()};
     float peak{0.f};
     std::string mixHash;
     std::string songHash;
@@ -95,6 +102,9 @@ struct SongRenderReport {
     std::string previewHash;
     double exportGain{1};
     double previewGain{1};
+    std::string dither{"none"};
+    std::uint32_t ditherSeed{1};
+    std::string floatMasterPath,floatMasterHash;
     std::optional<std::uint32_t> previewStartTick;
     std::optional<std::uint32_t> previewEndTick;
     std::vector<StemReport> stems;

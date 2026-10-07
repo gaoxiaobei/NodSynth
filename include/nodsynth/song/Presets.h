@@ -20,6 +20,7 @@ struct PresetInfo {
     std::string patchPath;
     std::string hash;
     persist::Json parameters{persist::Json::array()};
+    persist::Json production{persist::Json::object()};
 };
 
 struct PresetAuditionOptions {
@@ -38,6 +39,8 @@ struct PresetAuditionOptions {
 [[nodiscard]] std::optional<PresetInfo> findPreset(const std::filesystem::path& presetsRoot, std::string_view id);
 [[nodiscard]] persist::Json presetJson(const PresetInfo& info);
 [[nodiscard]] persist::Json listJson(const std::vector<PresetInfo>& presets);
+[[nodiscard]] std::vector<PresetInfo> searchPresets(const std::filesystem::path& presetsRoot,
+    std::string_view text, std::optional<std::string> role = std::nullopt);
 [[nodiscard]] bool bindPreset(
     SongDocument& song,
     const std::string& trackId,

@@ -13,6 +13,12 @@ add_executable(nod_tests
   runtime/RuntimeTests.cpp
   song/SongTests.cpp
   song/IterationTests.cpp
+  song/ProductionQualityTests.cpp
+  song/WorkflowTests.cpp
+  runtime/UnisonTests.cpp
+  song/SamplerTests.cpp
+  song/MixerTests.cpp
+  song/OutputQualityTests.cpp
   daw/TimelineTests.cpp
 )
 target_link_libraries(nod_tests PRIVATE nod_model nod_nodes nod_persist nod_midi nod_render_core nod_song nod_daw_core nod_graphcheck_scenarios Catch2::Catch2WithMain)
@@ -24,6 +30,12 @@ file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/presets" NOD_PRESETS_ROOT)
 target_compile_definitions(nod_tests PRIVATE "NOD_RENDER_EXECUTABLE=\"$<TARGET_FILE:nod_render>\"" "NOD_EXECUTABLE=\"$<TARGET_FILE:nod>\"" "NOD_FLUIDSYNTH=\"${NOD_FLUIDSYNTH_PATH}\"" "NOD_SOUNDFONT=\"${NOD_SOUNDFONT_PATH}\"" "NOD_MODEL_ADAPTER=\"$<TARGET_FILE:nod_model_adapter>\"" "NOD_PRESETS_ROOT=\"${NOD_PRESETS_ROOT}\"")
 add_dependencies(nod_tests nod_render nod nod_model_adapter)
 if(TARGET nod_vst3_worker)
+  target_sources(nod_tests PRIVATE vst3/EffectWorkerTests.cpp)
+  target_link_libraries(nod_tests PRIVATE nod_effect_worker)
+  target_compile_definitions(nod_tests PRIVATE "NOD_EFFECT_PROBE=\"$<TARGET_FILE:nod_effect_probe>\"")
+  add_dependencies(nod_tests nod_effect_probe)
+  target_compile_definitions(nod_tests PRIVATE "NOD_MDA_EFFECT=\"$<TARGET_FILE:mda-vst3>\"")
+  add_dependencies(nod_tests mda-vst3)
   target_compile_definitions(nod_tests PRIVATE "NOD_VST3_WORKER=\"$<TARGET_FILE:nod_vst3_worker>\"" "NOD_VST3_PLUGIN=\"$<TARGET_FILE:nodsynth_vst3>\"")
   add_dependencies(nod_tests nod_vst3_worker nodsynth_vst3)
   if(TARGET nod_latency_probe)
@@ -35,7 +47,7 @@ include(Catch)
 catch_discover_tests(nod_tests)
 
 add_executable(nod_alloc_probe runtime/AllocProbe.cpp)
-target_link_libraries(nod_alloc_probe PRIVATE nod_nodes)
+target_link_libraries(nod_alloc_probe PRIVATE nod_song)
 add_test(NAME runtime.no-allocation COMMAND nod_alloc_probe)
 
 if(NODSYNTH_BUILD_GRAPHCHECK)

@@ -9,9 +9,10 @@
 
 #include <nodsynth/midi/Smf.h>
 #include <nodsynth/persist/Json.h>
+#include <nodsynth/effects/Effect.h>
 
 namespace nodsynth::song {
-inline constexpr int kSongFormatVersion = 3;
+inline constexpr int kSongFormatVersion = 7;
 inline constexpr int kMinSupportedSongFormatVersion = 1;
 
 struct Diagnostic {
@@ -40,9 +41,21 @@ struct Resource {
     std::string kind{"patch"};
     std::string presetId;
     int presetVersion{0};
+    std::string license;
+    std::string source;
 };
 
-enum class InstrumentKind { nodsynth, externalCli, vst3 };
+enum class InstrumentKind { nodsynth, externalCli, vst3, sampler };
+
+struct SampleLayer {
+    std::string resourceId;
+    int rootNote{60}, lowNote{60}, highNote{60};
+    int lowVelocity{1}, highVelocity{127};
+    int chokeGroup{0};
+    double tuneCents{0}, gain{1};
+    double startSeconds{0}, endSeconds{0}; // Zero end selects the complete file.
+    double fadeInMs{1}, fadeOutMs{5};
+};
 
 struct Instrument {
     std::string id;
@@ -50,6 +63,8 @@ struct Instrument {
     std::string resourceId;
     std::string name;
     std::string adapter;
+    std::vector<SampleLayer> samples;
+    std::string stateResourceId;
 };
 
 struct Note {
@@ -94,9 +109,36 @@ struct ParameterLane {
     std::string interpolation{"linear"};
 };
 
+struct TickInterval {
+    std::uint32_t startTick{0}, endTick{0};
+};
+
+struct Pump {
+    std::uint32_t startTick{0}, endTick{0}, period{480}, recovery{240};
+    double depth{0.5};
+    double fadeMs{2};
+    std::vector<TickInterval> skip;
+};
+
+struct Send {
+    std::string target;
+    double gain{1};
+    bool preFader{false};
+};
+
+struct Bus {
+    std::string id, name;
+    std::string output{"master"};
+    double gain{1}, pan{0};
+    bool isReturn{false}, mute{false};
+    std::vector<effects::Config> inserts;
+    std::vector<Send> sends;
+};
+
 struct Track {
     std::string id;
     std::string name;
+    std::string role;
     std::string instrumentId;
     double gain{1.0};
     double pan{0.0};
@@ -108,6 +150,15 @@ struct Track {
     std::vector<ParameterLane> parameterAutomation;
     std::map<std::string, double> parameterValues;
     std::vector<PerformanceEvent> performance;
+    // Legacy documents use an absolute gain lane and equal-power channel gains.
+    std::string gainMode{"legacy"};
+    std::string panMode{"equal-power"};
+    std::optional<Pump> pump;
+    std::vector<TickInterval> mute;
+    double muteFadeMs{2};
+    std::string output{"master"};
+    std::vector<effects::Config> inserts;
+    std::vector<Send> sends;
 };
 
 struct PreservedEvent {
@@ -124,6 +175,11 @@ struct PreservedEvent {
     std::vector<std::uint8_t> payload;
 };
 
+struct Section {
+    std::string id, name;
+    std::uint32_t startTick{0}, endTick{0};
+};
+
 struct SongDocument {
     // Runtime context, never persisted in the portable document.
     std::filesystem::path baseDirectory;
@@ -136,6 +192,9 @@ struct SongDocument {
     std::vector<Resource> resources;
     std::vector<Instrument> instruments;
     std::vector<Track> tracks;
+    std::vector<Section> sections;
+    std::vector<Bus> buses;
+    std::vector<effects::Config> masterInserts;
     std::vector<PreservedEvent> preserved;
     std::vector<Diagnostic> diagnostics;
     std::vector<std::string> appliedRequests;
@@ -165,6 +224,7 @@ struct ApplyResult {
 
 struct QueryOptions {
     std::string view{"legacy"};
+    std::optional<std::string> role;
     std::optional<std::string> trackId;
     std::optional<std::uint32_t> startTick;
     std::optional<std::uint32_t> endTick;
@@ -219,7 +279,8 @@ struct ImportResult {
     SongDocument& song,
     const persist::Json& batch,
     std::optional<std::uint64_t> expectRevision = std::nullopt,
-    bool dryRun = false);
+    bool dryRun = false,
+    SongDocument* preview = nullptr);
 [[nodiscard]] ApplyResult undoSong(SongDocument& song);
 [[nodiscard]] ApplyResult redoSong(SongDocument& song);
 [[nodiscard]] persist::Json semanticDiff(const SongDocument& before, const SongDocument& after, bool expandAutomation = false, bool expandNotes = true);

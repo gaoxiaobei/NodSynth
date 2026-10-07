@@ -4,10 +4,14 @@
 #include <cmath>
 #include <sstream>
 #include <nodsynth/song/Automation.h>
+#include <nodsynth/song/Sampler.h>
+#include <nodsynth/song/Mixer.h>
+#include <nodsynth/song/Workflow.h>
 #include <nodsynth/render/OfflineRenderer.h>
 
 namespace nodsynth::song {
 namespace {
+using persist::Json;
 std::string hex64(std::uint64_t value) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string text(16, '0');
@@ -117,7 +121,20 @@ const Track* findTrack(const SongDocument& song, const std::string& id) {
 
 std::vector<std::string> registeredCommands() {
     return {
+        "set-role", "set-section", "delete-section", "repeat-phrase",
         "set-instrument",
+        "set-vst3-instrument",
+        "create-bus",
+        "set-bus",
+        "set-output",
+        "set-sends",
+        "set-inserts",
+        "set-effect-automation",
+        "add-sample-resource",
+        "add-plugin-resource",
+        "add-plugin-state",
+        "set-sampler",
+        "bind-sample-kit",
         "set-parameter",
         "set-gain",
         "set-pan",
@@ -146,6 +163,9 @@ std::vector<std::string> registeredCommands() {
         "transpose-notes",
         "scale-velocities",
         "add-pump",
+        "clear-pump",
+        "set-audio-mute",
+        "set-mix-mode",
     };
 }
 
@@ -162,6 +182,8 @@ persist::Json capabilitiesJson(const SongDocument& song) {
     persist::Json automation = persist::Json::array();
     automation.push(jsonString("track-gain"));
     automation.push(jsonString("instrument-parameter"));
+    automation.push(jsonString("independent-pump"));
+    automation.push(jsonString("post-track-audio-mute"));
     capabilities.set("automation", std::move(automation));
     capabilities.set("undo", persist::Json::boolean(!song.undoStack.empty()));
     capabilities.set("redo", persist::Json::boolean(!song.redoStack.empty()));
@@ -182,9 +204,50 @@ persist::Json capabilitiesJson(const SongDocument& song) {
     pan.set("automatable", persist::Json::boolean(false));
     parameters.push(std::move(pan));
     capabilities.set("parameters", std::move(parameters));
+    capabilities.set("mixSemantics", jsonString("multiply: fader * gain lane * pump * audio mute; legacy: absolute gain lane * pump * audio mute; balance preserves stereo gain at center; equal-power applies -3 dB per channel at center"));
+    capabilities.set("routing",routingJson(song));
+    capabilities.set("routingSemantics",jsonString("stereo DAG; inserts precede fader; post-fader sends include pump/mute; pre-fader sends follow inserts and precede mix controls; returns retain tails; return/bus mute is explicit; dry tracks precede inserts, post tracks follow fader, buses/returns include shared processing; isolated stem sum need not equal master"));
+    auto effects=Json::array();
+    for(const auto& schema:nodsynth::effects::schemas()) {
+        auto item=Json::object();item.set("type",jsonString(schema.type));item.set("version",jsonNumber(schema.version));
+        if(schema.type=="vst3") item.set("parameterDiscovery",jsonString("nod effect inspect BINARY --state FILE --class NAME --json; IDs are stable vst3:decimalId and normalized 0..1"));
+        if(schema.type=="vst3") {
+#if defined(NOD_HAS_EFFECT_WORKER)
+            item.set("available",Json::boolean(true));
+#else
+            item.set("available",Json::boolean(false));item.set("reason",jsonString("this build has no isolated VST3 host"));
+#endif
+        }
+        auto quality=Json::array();quality.push(jsonString("standard"));if(schema.type=="limiter" || schema.type=="saturation") quality.push(jsonString("high"));
+        item.set("qualityModes",std::move(quality));item.set("externalSidechain",Json::boolean(schema.type=="compressor"));
+        auto parameters=Json::array();for(const auto& parameter:schema.parameters) {
+            auto p=Json::object();p.set("id",jsonString(parameter.id));p.set("unit",jsonString(parameter.unit));
+            p.set("minimum",jsonNumber(parameter.minimum));p.set("maximum",jsonNumber(parameter.maximum));p.set("default",jsonNumber(parameter.defaultValue));
+            p.set("automatable",Json::boolean(parameter.automatable));parameters.push(std::move(p));
+        }
+        item.set("parameters",std::move(parameters));effects.push(std::move(item));
+    }
+    capabilities.set("effects",std::move(effects));
     auto instrumentParameters = persist::Json::array();
     for (const auto& track : song.tracks) {
         for (const auto& instrument : song.instruments) {
+            if(instrument.id==track.instrumentId && instrument.kind==InstrumentKind::vst3) {
+                auto item=Json::object();item.set("track",jsonString(track.id));item.set("backend",jsonString("vst3"));
+                item.set("className",jsonString(instrument.name));item.set("pluginResource",jsonString(instrument.resourceId));item.set("stateResource",jsonString(instrument.stateResourceId));
+                item.set("parameterDiscovery",jsonString("nod plugin inspect BINARY --class NAME --state FILE --json; isolated inspection includes stable IDs, titles, availability and module classes"));
+                instrumentParameters.push(std::move(item));
+            }
+            if (instrument.id == track.instrumentId && instrument.kind == InstrumentKind::sampler) {
+                auto item = persist::Json::object(); item.set("track", jsonString(track.id));
+                item.set("backend", jsonString("sampler"));
+                item.set("samples", sampleLayersJson(instrument.samples));
+                item.set("polyphony", jsonNumber(16));
+                item.set("rotation", jsonString("matching identical ranges rotate in document order, per MIDI channel; reset per render"));
+                item.set("noteOff", jsonString("ignored for one-shots; CC120/123 fade voices for 2 ms"));
+                item.set("parameterAutomation", jsonString("unsupported-target: sample configuration is fixed during prepare; track gain/pump/mute supported"));
+                item.set("resampling", jsonString("64-tap Blackman-windowed sinc, 512 interpolated phases; pre-rendered pitch banks; transpose 0.25..4; default 256 MiB preparation budget"));
+                instrumentParameters.push(std::move(item));
+            }
             if (instrument.id != track.instrumentId || instrument.kind != InstrumentKind::nodsynth) continue;
             for (const auto& resource : song.resources) {
                 if (resource.id != instrument.resourceId) continue;
@@ -220,6 +283,10 @@ persist::Json trackSummary(const Track& track, int order) {
     item.set("instrument", jsonString(track.instrumentId));
     item.set("gain", jsonNumber(track.gain));
     item.set("pan", jsonNumber(track.pan));
+    item.set("gainMode", jsonString(track.gainMode));
+    item.set("panMode", jsonString(track.panMode));
+    item.set("pumpEnabled", persist::Json::boolean(track.pump.has_value()));
+    item.set("muteIntervalCount", jsonNumber(static_cast<double>(track.mute.size())));
     if (track.sourceTrack) item.set("sourceTrack", jsonNumber(*track.sourceTrack));
     if (track.sourceChannel) item.set("sourceChannel", jsonNumber(*track.sourceChannel));
     item.set("clips", jsonNumber(static_cast<double>(track.clips.size())));
@@ -415,6 +482,7 @@ persist::Json querySong(const SongDocument& song, const QueryOptions& options) {
     json.set("ppq", jsonNumber(song.ppq));
     json.set("view", jsonString(options.view));
     const auto view = options.view.empty() ? std::string("legacy") : options.view;
+    if (view == "roles" || view == "sections" || view == "workflow") return workflowJson(song,options);
     if (view == "summary") {
         json.set("summary", tempoOverview(song));
         return json;
@@ -443,6 +511,8 @@ persist::Json querySong(const SongDocument& song, const QueryOptions& options) {
                 persist::Json item = persist::Json::object();
                 item.set("track", jsonString(track->id));
                 item.set("gainAutomation", options.expandAutomation ? automationFull(track->gainAutomation) : automationSummary(track->gainAutomation));
+                const auto controls = mixControlsJson(*track);
+                for (const auto& [field, value] : controls.items()) item.set(field, value);
                 auto parameters = persist::Json::array();
                 for (const auto& lane : track->parameterAutomation) {
                     auto record = persist::Json::object(); record.set("id", jsonString(lane.id));

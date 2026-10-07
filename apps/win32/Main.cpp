@@ -57,6 +57,9 @@ constexpr int kSearch = 1003;
 const char* kTypes[] = {
     "nod.midi-input", "nod.note-to-frequency", "nod.oscillator", "nod.adsr", "nod.lowpass", "nod.gain",
     "nod.add", "nod.multiply", "nod.scale-bias", "nod.mix", "nod.feedback-delay", "nod.voice-mix", "nod.audio-output",
+    "nod.pan-v2", "nod.lowpass-v2", "nod.highpass-v2", "nod.gain-v2", "nod.mix-v2", "nod.voice-mix-v2",
+    "nod.unison-v2",
+    "nod.music-delay", "nod.reverb",
 };
 
 struct KeyBinding {

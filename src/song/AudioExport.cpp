@@ -43,31 +43,49 @@ persist::Json readRecords(const std::filesystem::path& path, std::string& error)
 } // namespace
 
 bool writePcm16(const std::filesystem::path& path, const runtime::WavData& audio, bool attenuate, double& appliedGain, std::string& error) {
+    return writePcm(path,audio,16,attenuate,"none",1,appliedGain,error);
+}
+
+bool writePcm(const std::filesystem::path& path,const runtime::WavData& audio,std::uint16_t bits,
+    bool attenuate,const std::string& dither,std::uint32_t seed,double& appliedGain,std::string& error) {
+    if((bits!=16 && bits!=24) || (dither!="none" && dither!="tpdf")) {error="PCM export supports PCM16/24 and explicit none/tpdf dither";return false;}
+    const auto sampleBytes=bits/8;const auto scale=std::uint64_t{1}<<(bits-1);
+    const auto maximum=static_cast<std::int64_t>(scale-1),minimum=-static_cast<std::int64_t>(scale);
     double peak = 0;
-    if (!audio.channels || !audio.sampleRate || audio.interleaved.size() % audio.channels || audio.interleaved.size() > (0xffffffffull - 36) / 2) {
-        error = "invalid or oversized PCM16 audio"; return false;
+    if (!audio.channels || audio.channels>65535/sampleBytes || !audio.sampleRate ||
+        static_cast<std::uint64_t>(audio.sampleRate)*audio.channels*sampleBytes>UINT32_MAX ||
+        audio.interleaved.size() % audio.channels || audio.interleaved.size() > (0xffffffffull - 37) / sampleBytes) {
+        error = "invalid or oversized PCM audio"; return false;
     }
     for (const auto value : audio.interleaved) {
         if (!std::isfinite(value)) { error = "non-finite PCM sample"; return false; }
         peak = std::max(peak, std::fabs(static_cast<double>(value)));
     }
-    if (peak > 1 && !attenuate) { error = "PCM16 overflow: choose explicit attenuation"; return false; }
-    appliedGain = peak > 1 ? (32767.0 / 32768.0) / peak : 1;
+    const double ceiling=static_cast<double>(maximum-(dither=="tpdf"?1:0))/scale;
+    if(dither=="tpdf" && peak>ceiling && !attenuate) {error="TPDF dither requires quantizer headroom; choose explicit attenuation";return false;}
+    if (peak > 1 && !attenuate) { error = "PCM overflow: choose explicit attenuation"; return false; }
+    appliedGain = peak > ceiling && attenuate ? ceiling / peak : 1;
     auto temporary = path; temporary += ".pcm-tmp";
     std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-    if (!out) { error = "cannot open PCM16 output"; return false; }
-    const auto bytes = static_cast<std::uint32_t>(audio.interleaved.size() * 2);
-    out.write("RIFF", 4); runtime::writeLe32(out, 36 + bytes); out.write("WAVEfmt ", 8);
+    if (!out) { error = "cannot open PCM output"; return false; }
+    const auto bytes = static_cast<std::uint32_t>(audio.interleaved.size() * sampleBytes);
+    out.write("RIFF", 4); runtime::writeLe32(out, 36 + bytes+(bytes&1)); out.write("WAVEfmt ", 8);
     runtime::writeLe32(out, 16); runtime::writeLe16(out, 1); runtime::writeLe16(out, static_cast<std::uint16_t>(audio.channels));
-    runtime::writeLe32(out, audio.sampleRate); runtime::writeLe32(out, audio.sampleRate * audio.channels * 2);
-    runtime::writeLe16(out, static_cast<std::uint16_t>(audio.channels * 2)); runtime::writeLe16(out, 16);
+    runtime::writeLe32(out, audio.sampleRate); runtime::writeLe32(out, audio.sampleRate * audio.channels * sampleBytes);
+    runtime::writeLe16(out, static_cast<std::uint16_t>(audio.channels * sampleBytes)); runtime::writeLe16(out, bits);
     out.write("data", 4); runtime::writeLe32(out, bytes);
+    std::uint32_t random=seed?seed:0x9e3779b9u;
+    const auto uniform=[&]() {random^=random<<13;random^=random>>17;random^=random<<5;return static_cast<double>(random)/4294967296.0;};
     for (const auto value : audio.interleaved) {
-        const auto quantized = std::clamp(std::lround(value * appliedGain * 32768), -32768l, 32767l);
-        runtime::writeLe16(out, static_cast<std::uint16_t>(static_cast<std::int16_t>(quantized)));
+        double noise=0;
+        if(dither=="tpdf") {const auto first=uniform();const auto second=uniform();noise=first-second;}
+        const auto quantized=std::clamp(static_cast<std::int64_t>(std::llround(value*appliedGain*scale+noise)),minimum,maximum);
+        const auto code=static_cast<std::uint32_t>(quantized);
+        for(int byte=0;byte<sampleBytes;++byte) out.put(static_cast<char>((code>>(byte*8))&255));
     }
+    if(bytes&1) out.put(0);
     out.flush(); const bool ok = static_cast<bool>(out); out.close();
-    if (!ok) { error = "failed to write PCM16"; std::error_code ec; std::filesystem::remove(temporary, ec); return false; }
+    if (!ok) { error = "failed to write PCM"; std::error_code ec; std::filesystem::remove(temporary, ec); return false; }
     return replace(temporary, path, error);
 }
 

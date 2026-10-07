@@ -1,4 +1,5 @@
 #include <nodsynth/nodes/BuiltinNodes.h>
+#include <nodsynth/effects/Effect.h>
 
 #include <stdexcept>
 #include <utility>
@@ -192,6 +193,53 @@ model::SchemaRegistry builtinRegistry() {
     must(registry, make(
                        "nod.audio-output", "Audio Output", "Output", NodeScope::global,
                        {port("audio", "Audio", PortDirection::input, PortKind::audio, 2, PortDomain::sameAsNode)}, {}));
+    // New type IDs make migration explicit; v1 patch ports and DSP remain intact.
+    for (const auto* type : {"nod.lowpass", "nod.highpass", "nod.gain", "nod.mix", "nod.voice-mix"}) {
+        auto schema = *registry.find(NodeTypeId{type});
+        schema.typeId.value += "-v2";
+        schema.schemaVersion = 2;
+        schema.displayName += " Stereo v2";
+        for (auto& p : schema.ports) if (p.kind == PortKind::audio) p.channels = 2;
+        if (std::string(type) == "nod.lowpass" || std::string(type) == "nod.highpass") {
+            for (auto& p : schema.ports) if (p.id.value == "cutoff") p.id.value = "cutoff-mod";
+            schema.parameters[0].modulationPort = "cutoff-mod";
+            schema.parameters[0].modulationMode = ModulationMode::octave;
+            schema.parameters[0].depthParameter = "depth";
+            schema.parameters.push_back(parameter("depth", "Cutoff Depth", "octaves", -8, 8, 0, ParameterScale::linear, true));
+        } else if (std::string(type) == "nod.gain") {
+            schema.parameters[0].modulationPort = "gain";
+            schema.parameters[0].modulationMode = ModulationMode::multiply;
+        }
+        must(registry, std::move(schema));
+    }
+    auto pan = make("nod.pan-v2", "Mono Pan v2", "Audio", NodeScope::perVoice,
+        {port("audio-in", "Mono In", PortDirection::input, PortKind::audio, 1, PortDomain::sameAsNode),
+         port("audio-out", "Stereo Out", PortDirection::output, PortKind::audio, 2, PortDomain::sameAsNode)},
+        {parameter("pan", "Pan", "equal-power", -1, 1, 0, ParameterScale::linear, true)});
+    pan.schemaVersion = 2;
+    must(registry, std::move(pan));
+    auto unison = make("nod.unison-v2", "Unison Saw v2", "Source", NodeScope::perVoice,
+        {port("frequency", "Frequency", PortDirection::input, PortKind::control, 1, PortDomain::sameAsNode),
+         port("audio", "Stereo Audio", PortDirection::output, PortKind::audio, 2, PortDomain::sameAsNode)},
+        {parameter("voices", "Unison Voices", "oscillators/note", 1, 8, 7, ParameterScale::linear, false),
+         parameter("detune", "Detune", "cents", 0, 100, 18, ParameterScale::linear, true),
+         parameter("spread", "Spread", "ratio", 0, 1, .8, ParameterScale::linear, true),
+         parameter("phase", "Phase (0 retrigger, 1 random)", "", 0, 1, 1, ParameterScale::linear, false),
+         parameter("blend", "Blend", "ratio", 0, 1, .6, ParameterScale::linear, true),
+         parameter("level", "Level", "linear-amplitude", 0, 1, .2, ParameterScale::linear, true),
+         parameter("seed", "Seed", "", 0, 2147483647, 1, ParameterScale::linear, false),
+         parameter("frequency", "Frequency", "Hz", 0, 20000, 440, ParameterScale::linear, true)});
+    unison.schemaVersion = 2;
+    must(registry, std::move(unison));
+    for(const auto& effect:effects::schemas()) {
+        if(effect.type!="delay" && effect.type!="reverb") continue;
+        std::vector<ParameterSchema> parameters;
+        for(const auto& p:effect.parameters) parameters.push_back(parameter(p.id.c_str(),p.id.c_str(),p.unit.c_str(),p.minimum,p.maximum,p.defaultValue,ParameterScale::linear,p.automatable));
+        if(effect.type=="delay") parameters.push_back(parameter("tempoBpm","Tempo","BPM",20,400,120,ParameterScale::linear,true));
+        must(registry,make(effect.type=="delay"?"nod.music-delay":"nod.reverb",effect.type=="delay"?"Music Delay":"Stereo Reverb","Effects",NodeScope::global,
+            {port("audio-in","Stereo In",PortDirection::input,PortKind::audio,2,PortDomain::sameAsNode),
+             port("audio-out","Stereo Out",PortDirection::output,PortKind::audio,2,PortDomain::sameAsNode)},std::move(parameters)));
+    }
     return registry;
 }
 } // namespace nodsynth::nodes

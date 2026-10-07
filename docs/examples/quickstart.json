@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "requestId": "quickstart-arrange-v1",
+  "commands": [
+    {"op":"create-track","id":"kick","name":"Kick"},
+    {"op":"set-role","track":"kick","role":"kick"},
+    {"op":"bind-preset","track":"kick","preset":"kick"},
+    {"op":"set-gain","track":"kick","gain":0.35},
+    {"op":"add-pattern","track":"kick","id":"kick-phrase","startBar":1,"endBar":5,"grid":"1/4","duration":"1/8","pitches":[36],"velocities":[105]},
+    {"op":"create-track","id":"bass","name":"Bass"},
+    {"op":"bind-preset","track":"bass","preset":"production-offbeat-bass"},
+    {"op":"set-gain","track":"bass","gain":0.3},
+    {"op":"set-mix-mode","track":"bass","panMode":"balance"},
+    {"op":"add-pattern","track":"bass","id":"bass-phrase","startBar":1,"endBar":5,"grid":"1/4","duration":"1/8","offset":"1/8","pitches":[45,45,45,45,41,41,41,41,48,48,48,48,43,43,43,43],"velocities":[90]},
+    {"op":"create-track","id":"lead","name":"Lead"},
+    {"op":"bind-preset","track":"lead","preset":"production-lead"},
+    {"op":"set-gain","track":"lead","gain":0.3},
+    {"op":"set-mix-mode","track":"lead","panMode":"balance"},
+    {"op":"add-pattern","track":"lead","id":"lead-phrase","startBar":1,"endBar":5,"grid":"1/8","duration":"1/16","pitches":[69,72,76,72,67,71,74,71],"velocities":[90,70,80,70]},
+    {"op":"set-section","id":"loop","name":"Loop","startTick":0,"endTick":7680}
+  ]
+}

@@ -1,4 +1,5 @@
 #include <nodsynth/host/Vst3Host.h>
+#include <nodsynth/host/EffectWorker.h>
 #include <nodsynth/midi/Smf.h>
 #include <nodsynth/persist/Json.h>
 #include <nodsynth/runtime/WavFile.h>
@@ -25,6 +26,7 @@ int fail(const std::string& message)
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--crash") std::abort();
+    if(argc==3 && std::string(argv[1])=="--effect-worker") return nodsynth::host::runEffectWorker(argv[2]);
     if (argc < 8) return fail("usage: nod_vst3_worker plugin class midi wav rate block tail-seconds");
     const std::filesystem::path plugin = argv[1];
     const std::string className = std::string(argv[2]) == "-" ? std::string{} : argv[2];
@@ -43,6 +45,12 @@ int main(int argc, char** argv)
     nodsynth::host::Vst3Plugin instrument;
     std::string error;
     if (!instrument.open(plugin, error, className)) return fail(error.empty() ? "failed to open the plugin" : error);
+    if(argc>=10 && std::string(argv[9])!="-") {
+        std::ifstream input(std::filesystem::path(argv[9]),std::ios::binary|std::ios::ate);
+        if(!input || input.tellg()<0 || input.tellg()>16*1024*1024) return fail("missing or oversized VST3 instrument state");
+        std::vector<char> state(static_cast<std::size_t>(input.tellg()));input.seekg(0);input.read(state.data(),state.size());
+        if(!input || !instrument.restoreState(state,error)) return fail(error.empty()?"failed to restore instrument state":error);
+    }
     if (!instrument.activate(rate, block, error)) return fail(error.empty() ? "failed to activate the plugin" : error);
 
     struct ResolvedPoint {
@@ -150,6 +158,7 @@ int main(int argc, char** argv)
         if (!instrument.process(left.data(), right.data(), block, blockEvents, error, nullptr, nullptr, blockParameters.empty() ? nullptr : &blockParameters)) {
             return fail(error.empty() ? "plugin process failed" : error);
         }
+        if(instrument.currentLatency()!=latency) return fail("VST3 instrument changed latency during render");
         for (std::uint32_t frame = 0; frame < block && rendered + frame < total; ++frame) {
             interleaved[static_cast<std::size_t>(rendered + frame) * 2] = left[frame];
             interleaved[static_cast<std::size_t>(rendered + frame) * 2 + 1] = right[frame];

@@ -1,4 +1,6 @@
 #include <nodsynth/nodes/BuiltinNodes.h>
+#include <nodsynth/nodes/GlobalEffect.h>
+#include <nodsynth/nodes/Unison.h>
 
 #include <algorithm>
 #include <cmath>
@@ -233,8 +235,11 @@ public:
     void reset() override {}
     void process(std::uint32_t voice, std::uint32_t frames) override {
         for (std::uint32_t frame = 0; frame < frames; ++frame) {
-            const float amount = std::clamp(load(gain_, voice, 0, frame, parameters_.at(0, frame)), 0.f, 4.f);
-            store(output_, voice, 0, frame, load(audio_, voice, 0, frame, 0.f) * amount);
+            const float base = parameters_.at(0, frame);
+            const float amount = std::clamp(output_.channels == 2 ? base * load(gain_, voice, 0, frame, 1.f) :
+                load(gain_, voice, 0, frame, base), 0.f, 4.f);
+            for (std::uint32_t channel = 0; channel < output_.channels; ++channel)
+                store(output_, voice, channel, frame, load(audio_, voice, channel, frame, 0.f) * amount);
         }
     }
 
@@ -290,32 +295,41 @@ public:
     void bind(const NodeBinding& binding) {
         audio_ = port(binding.inputs, "audio-in");
         cutoff_ = port(binding.inputs, "cutoff");
+        modulation_ = port(binding.inputs, "cutoff-mod");
         resonance_ = port(binding.inputs, "resonance");
         output_ = port(binding.outputs, "audio-out");
         parameters_ = binding.parameters;
         sampleRate_ = binding.sampleRate;
-        states_.assign(binding.voiceCount, {});
+        states_.assign(binding.voiceCount * output_.channels, {});
     }
     void reset() { std::fill(states_.begin(), states_.end(), State{}); }
     void process(std::uint32_t voice, std::uint32_t frames, bool highpass) {
-        auto& state = states_[voice];
         for (std::uint32_t frame = 0; frame < frames; ++frame) {
+            float cutoffValue = load(cutoff_, voice, 0, frame, parameters_.at(0, frame));
+            if (parameters_.count > 2) {
+                const float mod = std::clamp(load(modulation_, voice, 0, frame, 0.f), -1.f, 1.f);
+                cutoffValue = std::clamp(parameters_.at(0, frame) * std::exp2(parameters_.at(2, frame) * mod), 20.f, 20000.f);
+            }
             const float cutoff = std::clamp(
-                load(cutoff_, voice, 0, frame, parameters_.at(0, frame)), 20.f, static_cast<float>(sampleRate_ * 0.45));
+                cutoffValue, 20.f, static_cast<float>(sampleRate_ * 0.45));
             const float resonance = std::clamp(load(resonance_, voice, 0, frame, parameters_.at(1, frame)), 0.f, 0.98f);
             const float g = std::tan(static_cast<float>(std::numbers::pi) * cutoff / static_cast<float>(sampleRate_));
             const float k = 2.f * (1.f - resonance);
             const float a1 = 1.f / (1.f + g * (g + k));
             const float a2 = g * a1;
             const float a3 = g * a2;
-            const float input = load(audio_, voice, 0, frame, 0.f);
-            const float v3 = input - state.ic2;
-            const float v1 = a1 * state.ic1 + a2 * v3;
-            const float v2 = state.ic2 + a2 * state.ic1 + a3 * v3;
-            state.ic1 = 2.f * v1 - state.ic1;
-            state.ic2 = 2.f * v2 - state.ic2;
-            if (!std::isfinite(state.ic1) || !std::isfinite(state.ic2)) state = {};
-            store(output_, voice, 0, frame, highpass ? input - k * v1 - v2 : state.ic2);
+            for (std::uint32_t channel = 0; channel < output_.channels; ++channel) {
+                auto& state = states_[voice * output_.channels + channel];
+                const float input = load(audio_, voice, channel, frame, 0.f);
+                const float v3 = input - state.ic2;
+                const float v1 = a1 * state.ic1 + a2 * v3;
+                const float v2 = state.ic2 + a2 * state.ic1 + a3 * v3;
+                state.ic1 = 2.f * v1 - state.ic1;
+                state.ic2 = 2.f * v2 - state.ic2;
+                if (!std::isfinite(state.ic1) || !std::isfinite(state.ic2)) state = {};
+                // v1 retains its historical state output; v2 uses the TPT lowpass output.
+                store(output_, voice, channel, frame, highpass ? input - k * v1 - v2 : parameters_.count>2?v2:state.ic2);
+            }
         }
     }
 
@@ -326,6 +340,7 @@ private:
     };
     BufferView audio_{};
     BufferView cutoff_{};
+    BufferView modulation_{};
     BufferView resonance_{};
     BufferView output_{};
     runtime::ParamView parameters_{};
@@ -496,8 +511,10 @@ public:
     void process(std::uint32_t voice, std::uint32_t frames) override {
         for (std::uint32_t frame = 0; frame < frames; ++frame) {
             const float mix = std::clamp(load(mix_, voice, 0, frame, parameters_.at(0, frame)), 0.f, 1.f);
-            const float mixed = load(a_, voice, 0, frame, 0.f) * (1.f - mix) + load(b_, voice, 0, frame, 0.f) * mix;
-            store(output_, voice, 0, frame, mixed);
+            for (std::uint32_t channel = 0; channel < output_.channels; ++channel) {
+                const float mixed = load(a_, voice, channel, frame, 0.f) * (1.f - mix) + load(b_, voice, channel, frame, 0.f) * mix;
+                store(output_, voice, channel, frame, mixed);
+            }
         }
     }
 
@@ -521,15 +538,16 @@ public:
     void reset() override {}
     void process(std::uint32_t, std::uint32_t frames) override {
         for (std::uint32_t frame = 0; frame < frames; ++frame) {
-            float sum = 0.f;
-            for (std::uint32_t voice = 0; voice < voiceCount_; ++voice) {
-                const float attenuation =
-                    attenuation_ != nullptr && attenuation_[voice] != nullptr ? attenuation_[voice][frame] : 1.f;
-                sum += load(voices_, voice, 0, frame, 0.f) * attenuation;
+            for (std::uint32_t channel = 0; channel < 2; ++channel) {
+                float sum = 0.f;
+                for (std::uint32_t voice = 0; voice < voiceCount_; ++voice) {
+                    const float attenuation =
+                        attenuation_ != nullptr && attenuation_[voice] != nullptr ? attenuation_[voice][frame] : 1.f;
+                    sum += load(voices_, voice, voices_.channels == 2 ? channel : 0, frame, 0.f) * attenuation;
+                }
+                const float level = parameters_.count > 0 ? parameters_.at(0, frame) : 1.f;
+                store(output_, 0, channel, frame, sum * level);
             }
-            const float level = parameters_.count > 0 ? parameters_.at(0, frame) : 1.f;
-            store(output_, 0, 0, frame, sum * level);
-            store(output_, 0, 1, frame, sum * level);
         }
     }
 
@@ -539,6 +557,27 @@ private:
     runtime::ParamView parameters_{};
     const float* const* attenuation_{nullptr};
     std::uint32_t voiceCount_{1};
+};
+
+class Pan final : public runtime::DspNode {
+public:
+    void bind(const NodeBinding& binding) override {
+        input_ = port(binding.inputs, "audio-in");
+        output_ = port(binding.outputs, "audio-out");
+        parameters_ = binding.parameters;
+    }
+    void reset() override {}
+    void process(std::uint32_t voice, std::uint32_t frames) override {
+        for (std::uint32_t frame = 0; frame < frames; ++frame) {
+            const float angle = (parameters_.at(0, frame) + 1.f) * static_cast<float>(std::numbers::pi / 4);
+            const float sample = load(input_, voice, 0, frame, 0.f);
+            store(output_, voice, 0, frame, sample * std::cos(angle));
+            store(output_, voice, 1, frame, sample * std::sin(angle));
+        }
+    }
+private:
+    BufferView input_{}, output_{};
+    runtime::ParamView parameters_{};
 };
 
 class AudioOutput final : public runtime::DspNode {
@@ -566,6 +605,8 @@ private:
 
 std::uint64_t stateBytesFor(
     const model::NodeTypeId& typeId, double sampleRate, std::uint32_t maxFrames, std::uint32_t voices) {
+    if (typeId.value == "nod.unison-v2") return unisonStateBytes(voices);
+    if(typeId.value=="nod.music-delay" || typeId.value=="nod.reverb") return globalEffectStateBytes(typeId.value=="nod.music-delay"?"delay":"reverb",sampleRate,maxFrames);
     if (typeId.value == "nod.feedback-delay") {
         const auto capacity = static_cast<std::uint64_t>(runtime::delayLineCapacity(sampleRate, maxFrames));
         return voices * (capacity + static_cast<std::uint64_t>(maxFrames) * 2ull) * sizeof(float) + 256ull;
@@ -580,7 +621,9 @@ public:
         return id == "nod.midi-input" || id == "nod.note-to-frequency" || id == "nod.oscillator" || id == "nod.adsr" ||
                id == "nod.gain" || id == "nod.noise" || id == "nod.lowpass" || id == "nod.highpass" ||
                id == "nod.feedback-delay" || id == "nod.add" || id == "nod.multiply" || id == "nod.scale-bias" ||
-               id == "nod.mix" || id == "nod.voice-mix" || id == "nod.audio-output";
+               id == "nod.mix" || id == "nod.voice-mix" || id == "nod.audio-output" ||
+               id == "nod.lowpass-v2" || id == "nod.highpass-v2" || id == "nod.gain-v2" ||
+               id == "nod.mix-v2" || id == "nod.voice-mix-v2" || id == "nod.pan-v2" || id == "nod.unison-v2" || id=="nod.music-delay" || id=="nod.reverb";
     }
     std::uint64_t stateBytes(
         const model::NodeTypeId& typeId, double sampleRate, std::uint32_t maxFrames, std::uint32_t voices) const override {
@@ -588,20 +631,23 @@ public:
     }
     std::unique_ptr<runtime::DspNode> instantiate(const model::NodeTypeId& typeId) const override {
         const auto& id = typeId.value;
+        if (id == "nod.unison-v2") return makeUnisonOscillator();
+        if(id=="nod.music-delay" || id=="nod.reverb") return makeGlobalEffect(id=="nod.music-delay"?"delay":"reverb");
         if (id == "nod.midi-input") return std::make_unique<MidiInput>();
         if (id == "nod.note-to-frequency") return std::make_unique<NoteToFrequency>();
         if (id == "nod.oscillator") return std::make_unique<Oscillator>();
         if (id == "nod.adsr") return std::make_unique<Adsr>();
-        if (id == "nod.gain") return std::make_unique<Gain>();
+        if (id == "nod.gain" || id == "nod.gain-v2") return std::make_unique<Gain>();
         if (id == "nod.noise") return std::make_unique<Noise>();
-        if (id == "nod.lowpass") return std::make_unique<Lowpass>();
-        if (id == "nod.highpass") return std::make_unique<Highpass>();
+        if (id == "nod.lowpass" || id == "nod.lowpass-v2") return std::make_unique<Lowpass>();
+        if (id == "nod.highpass" || id == "nod.highpass-v2") return std::make_unique<Highpass>();
         if (id == "nod.feedback-delay") return std::make_unique<FeedbackDelay>();
         if (id == "nod.add") return std::make_unique<Add>();
         if (id == "nod.multiply") return std::make_unique<Multiply>();
         if (id == "nod.scale-bias") return std::make_unique<ScaleBias>();
-        if (id == "nod.mix") return std::make_unique<Mix>();
-        if (id == "nod.voice-mix") return std::make_unique<VoiceMix>();
+        if (id == "nod.mix" || id == "nod.mix-v2") return std::make_unique<Mix>();
+        if (id == "nod.voice-mix" || id == "nod.voice-mix-v2") return std::make_unique<VoiceMix>();
+        if (id == "nod.pan-v2") return std::make_unique<Pan>();
         if (id == "nod.audio-output") return std::make_unique<AudioOutput>();
         return nullptr;
     }

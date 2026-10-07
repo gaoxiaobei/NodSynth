@@ -44,15 +44,28 @@ struct NodeRecord {
 };
 
 struct GraphSnapshot {
+    struct Macro {
+        std::string id;
+        struct Mapping {
+            NodeId node;
+            ParameterId parameter;
+            double minimum{0},maximum{1};
+            std::string curve{"linear"};
+            bool operator==(const Mapping&) const = default;
+        };
+        std::vector<Mapping> mappings;
+        bool operator==(const Macro&) const = default;
+    };
     std::vector<NodeRecord> nodes;
     std::vector<Connection> connections;
+    std::vector<Macro> macros;
 };
 
 class GraphDocument {
 public:
     [[nodiscard]] const std::vector<NodeRecord>& nodes() const noexcept { return nodes_; }
     [[nodiscard]] const std::vector<Connection>& connections() const noexcept { return connections_; }
-    [[nodiscard]] GraphSnapshot snapshot() const { return {nodes_, connections_}; }
+    [[nodiscard]] GraphSnapshot snapshot() const { return {nodes_, connections_,macros_}; }
     [[nodiscard]] const NodeRecord* findNode(const NodeId& id) const noexcept;
     [[nodiscard]] const Viewport& viewport() const noexcept { return viewport_; }
 
@@ -61,6 +74,7 @@ private:
 
     std::vector<NodeRecord> nodes_;
     std::vector<Connection> connections_;
+    std::vector<GraphSnapshot::Macro> macros_;
     Viewport viewport_{};
 };
 } // namespace nodsynth::model

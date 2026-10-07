@@ -35,6 +35,51 @@ bool range(const SongDocument& song, const Json& command, std::uint32_t& from, s
     }
     return barsToTicks(song, static_cast<std::uint32_t>(start), static_cast<std::uint32_t>(end), from, to, error);
 }
+void mergeIntervals(std::vector<TickInterval>& intervals) {
+    std::sort(intervals.begin(), intervals.end(), [](const auto& a, const auto& b) { return a.startTick < b.startTick; });
+    std::vector<TickInterval> merged;
+    for (const auto& interval : intervals) {
+        if (!merged.empty() && interval.startTick <= merged.back().endTick)
+            merged.back().endTick = std::max(merged.back().endTick, interval.endTick);
+        else merged.push_back(interval);
+    }
+    intervals = std::move(merged);
+}
+bool barIntervals(const SongDocument& song, const Json* bars, std::vector<TickInterval>& intervals, std::string& error) {
+    if (!bars) return true;
+    if (bars->kind() != Json::Kind::array) { error = "bars must be an array of 1-based bar numbers"; return false; }
+    for (const auto& value : bars->asArray()) {
+        std::int64_t bar = 0;
+        if (!integer(&value, 1, UINT32_MAX - 1, bar)) { error = "invalid bar number"; return false; }
+        TickInterval interval;
+        if (!barsToTicks(song, static_cast<std::uint32_t>(bar), static_cast<std::uint32_t>(bar + 1), interval.startTick, interval.endTick, error)) return false;
+        intervals.push_back(interval);
+    }
+    mergeIntervals(intervals);
+    return true;
+}
+bool tickIntervals(const Json* values, std::vector<TickInterval>& intervals, std::string& error) {
+    if (!values) return true;
+    if (values->kind() != Json::Kind::array) { error = "tick intervals must be an array"; return false; }
+    for (const auto& value : values->asArray()) {
+        std::int64_t start = 0, end = 0;
+        if (!integer(value.find("startTick"), 0, UINT32_MAX, start) || !integer(value.find("endTick"), 1, UINT32_MAX, end) || start >= end) {
+            error = "invalid tick interval"; return false;
+        }
+        intervals.push_back({static_cast<std::uint32_t>(start), static_cast<std::uint32_t>(end)});
+    }
+    mergeIntervals(intervals);
+    return true;
+}
+bool fadeValue(const Json& command, double& fade, std::string& error) {
+    if (const auto* value = command.find("fadeMs")) {
+        if (value->kind() != Json::Kind::number || !std::isfinite(value->asNumber()) || value->asNumber() < 0 || value->asNumber() > 1000) {
+            error = "fadeMs must be 0..1000 milliseconds"; return false;
+        }
+        fade = value->asNumber();
+    }
+    return true;
+}
 bool chord(const Json& item, std::vector<int>& pitches, std::string& error) {
     std::int64_t root = 0;
     if (!integer(item.find("root"), 0, 127, root)) { error = "chord requires root MIDI pitch"; return false; }
@@ -113,23 +158,36 @@ bool applyPhrase(SongDocument& song, const persist::Json& command, persist::Json
         }
         return true;
     }
+    if (name == "set-audio-mute") {
+        std::vector<TickInterval> intervals;
+        if (command.find("startBar") || command.find("endBar")) {
+            TickInterval interval;
+            if (!range(song, command, interval.startTick, interval.endTick, error)) return false;
+            intervals.push_back(interval);
+        }
+        if (!barIntervals(song, command.find("muteBars"), intervals, error) || !fadeValue(command, track->muteFadeMs, error)) return false;
+        if (!tickIntervals(command.find("intervals"), intervals, error)) return false;
+        track->mute = std::move(intervals);
+        return true;
+    }
     std::uint32_t from = 0, to = 0;
     if (!range(song, command, from, to, error)) return false;
     if (name == "add-pump") {
+        if (command.find("mode") && command.find("mode")->asString() != "replace") { error = "pump mode must be replace"; return false; }
         std::uint32_t period = 0, recovery = 0;
         if (!fraction(command.find("period"), song.ppq, period, false, error) || !fraction(command.find("recovery"), song.ppq, recovery, false, error)) return false;
         const auto* depth = command.find("depth");
         if (!depth || depth->kind() != Json::Kind::number || !std::isfinite(depth->asNumber()) || depth->asNumber() < 0 || depth->asNumber() > 1 || recovery >= period) {
             error = "pump requires depth 0..1 and recovery shorter than period"; return false;
         }
-        std::vector<GainPoint> points;
         if ((to - from) / period > 100000) { error = "pump exceeds point limit"; return false; }
-        for (std::uint64_t tick = from; tick < to; tick += period) {
-            points.push_back({static_cast<std::uint32_t>(tick), 1 - depth->asNumber()});
-            if (tick + recovery < to) points.push_back({static_cast<std::uint32_t>(tick + recovery), 1});
-            if (tick + period - 1 < to) points.push_back({static_cast<std::uint32_t>(tick + period - 1), 1});
+        if (track->pump && (!command.find("mode") || command.find("mode")->asString() != "replace")) {
+            error = "pump already exists; choose explicit mode: replace"; return false;
         }
-        points.push_back({to, 1}); track->gainAutomation = std::move(points); return true;
+        Pump pump{from, to, period, recovery, depth->asNumber()};
+        if (!barIntervals(song, command.find("skipBars"), pump.skip, error) || !fadeValue(command, pump.fadeMs, error)) return false;
+        if (!tickIntervals(command.find("skipIntervals"), pump.skip, error)) return false;
+        track->pump = std::move(pump); return true;
     }
     const auto* id = command.find("id");
     if (!id || id->asString().empty()) { error = "pattern requires a stable clip id"; return false; }

@@ -78,6 +78,54 @@ model::GraphSnapshot filterPatch() {
     return snapshot;
 }
 
+model::GraphSnapshot stereoFilterPatch() {
+    auto snapshot = sinePatch();
+    auto pan = node("pan", "nod.pan-v2", 700.f, 40.f);
+    pan.schemaVersion = 2;
+    set(pan, "pan", -0.25);
+    auto filter = node("filter", "nod.lowpass-v2", 820.f, 40.f);
+    filter.schemaVersion = 2;
+    set(filter, "cutoff", 600);
+    set(filter, "depth", 3);
+    snapshot.nodes.push_back(std::move(pan));
+    snapshot.nodes.push_back(std::move(filter));
+    for (auto& record : snapshot.nodes) {
+        if (record.id.value == "oscillator") set(record, "waveform", 2);
+        if (record.id.value == "gain" || record.id.value == "voice-mix") {
+            record.typeId.value += "-v2";
+            record.schemaVersion = 2;
+        }
+    }
+    std::erase_if(snapshot.connections, [](const auto& wire) { return wire.from.nodeId.value == "oscillator"; });
+    snapshot.connections.push_back(cable("oscillator", "audio", "pan", "audio-in"));
+    snapshot.connections.push_back(cable("pan", "audio-out", "filter", "audio-in"));
+    snapshot.connections.push_back(cable("envelope", "envelope", "filter", "cutoff-mod"));
+    snapshot.connections.push_back(cable("filter", "audio-out", "gain", "audio-in"));
+    return snapshot;
+}
+
+model::GraphSnapshot unisonPatch(bool pad) {
+    auto snapshot = stereoFilterPatch();
+    std::erase_if(snapshot.nodes, [](const auto& record) { return record.id.value == "pan"; });
+    std::erase_if(snapshot.connections, [](const auto& wire) { return wire.from.nodeId.value == "pan" || wire.to.nodeId.value == "pan"; });
+    snapshot.connections.push_back(cable("oscillator", "audio", "filter", "audio-in"));
+    for (auto& record : snapshot.nodes) {
+        if (record.id.value == "oscillator") {
+            record.typeId.value = "nod.unison-v2"; record.schemaVersion = 2;
+            record.parameters.clear();
+            set(record, "voices", pad ? 8 : 7); set(record, "detune", pad ? 12 : 22);
+            set(record, "spread", pad ? 1 : .8); set(record, "level", pad ? .16 : .18);
+            set(record, "blend", .6); set(record, "phase", 1); set(record, "seed", 1979);
+        }
+        if (record.id.value == "envelope") {
+            set(record, "attack", pad ? .15 : .008); set(record, "decay", pad ? .3 : .18);
+            set(record, "sustain", pad ? .75 : .6); set(record, "release", pad ? .8 : .25);
+        }
+        if (record.id.value == "filter") { set(record, "cutoff", pad ? 1600 : 1400); set(record, "depth", pad ? 1 : 2); }
+    }
+    return snapshot;
+}
+
 model::GraphSnapshot delayPatch() {
     auto snapshot = sinePatch();
     snapshot.nodes.push_back(node("delay", "nod.feedback-delay", 1080.f, 40.f));

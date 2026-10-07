@@ -1,0 +1,174 @@
+{
+  "license": "Original patch settings; sample kit CC0-1.0",
+  "auditionStatus": "unheard",
+  "drums": "../electronic-one-shots/kit.json",
+  "schemaVersion": 1,
+  "listening": {
+    "reviewer": null,
+    "reference": null,
+    "status": "pending"
+  },
+  "presets": [
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          55,
+          120
+        ],
+        "widthPolicy": "stereo; balance at center",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          60,
+          96
+        ],
+        "dependencies": [],
+        "role": "lead"
+      },
+      "sha256": "C6CB638C053C92F6A174283D335FE8BF73E6532E7AA20310FA1F0A1E18EC3B80",
+      "id": "production-lead",
+      "role": "lead",
+      "path": "production-lead.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          40,
+          110
+        ],
+        "widthPolicy": "stereo; avoid doubling sub register",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          48,
+          84
+        ],
+        "dependencies": [],
+        "role": "pad"
+      },
+      "sha256": "43A450985C017020142541045DF5D094CC1367D1DC089D59BA382888B4F144EF",
+      "id": "production-pad",
+      "role": "pad",
+      "path": "production-pad.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          50,
+          120
+        ],
+        "widthPolicy": "moderate stereo; mono compatible audition pending",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          55,
+          91
+        ],
+        "dependencies": [],
+        "role": "pluck"
+      },
+      "sha256": "19FED8C23A05681979E754E1901967370BC7BF6EA66CE2BCE3A5EF06297BD33B",
+      "id": "production-pluck",
+      "role": "pluck",
+      "path": "production-pluck.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          65,
+          120
+        ],
+        "widthPolicy": "mono (spread 0, phase retrigger)",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          28,
+          55
+        ],
+        "dependencies": [],
+        "role": "bass"
+      },
+      "sha256": "91CB90461BC1139FABC2EE47A4D5464D3618D812BF417F4B409742D3027B719E",
+      "id": "production-offbeat-bass",
+      "role": "bass",
+      "path": "production-offbeat-bass.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          65,
+          120
+        ],
+        "widthPolicy": "mono sine; center pan",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          24,
+          48
+        ],
+        "dependencies": [],
+        "role": "sub"
+      },
+      "sha256": "1351F9D542453366EF03142E89A5FDE501873191D42CD90645AFEF3D1B04673C",
+      "id": "production-sub",
+      "role": "sub",
+      "path": "production-sub.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          50,
+          110
+        ],
+        "widthPolicy": "stereo; highpass on track",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          60,
+          84
+        ],
+        "dependencies": [],
+        "role": "riser"
+      },
+      "sha256": "3CEC60F2F9BEDC2A44CA0067A0F2BF38AAC3275E2AAC62C5328A02B3A7F74745",
+      "id": "production-riser",
+      "role": "riser",
+      "path": "production-riser.json"
+    },
+    {
+      "metadata": {
+        "recommendedVelocity": [
+          65,
+          120
+        ],
+        "widthPolicy": "narrow stereo; low-frequency track kept centered",
+        "version": 1,
+        "schemaVersion": 1,
+        "auditionStatus": "unheard",
+        "levelPolicy": "single voice source level 0.08..0.2; measure actual polyphonic peaks before mastering",
+        "recommendedMidiRange": [
+          28,
+          52
+        ],
+        "dependencies": [],
+        "role": "impact"
+      },
+      "sha256": "75DD050F087C1CB88C8D5C50C76C3A42EDB4DED4B0B1B8984A17B6BA7A9FEC95",
+      "id": "production-impact",
+      "role": "impact",
+      "path": "production-impact.json"
+    }
+  ]
+}

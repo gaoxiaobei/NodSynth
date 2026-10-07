@@ -11,10 +11,13 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmessage.h"
 
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <cmath>
+#include <limits>
 
 namespace nodsynth::host {
 namespace {
@@ -85,11 +88,16 @@ struct Vst3Plugin::Instance {
     Steinberg::IPtr<Steinberg::Vst::IComponent> component;
     Steinberg::IPtr<Steinberg::Vst::IAudioProcessor> processor;
     Steinberg::IPtr<Steinberg::Vst::IEditController> controller;
+    Steinberg::IPtr<Steinberg::Vst::IConnectionPoint> componentConnection,controllerConnection;
     Steinberg::Vst::HostProcessData process;
     Steinberg::Vst::EventList events{64};
     Steinberg::Vst::ParameterChanges parameterChanges{16};
     Steinberg::Vst::ProcessContext context{};
     bool processing{false};
+    std::uint32_t capacity{0};
+    bool audioInput{false};
+    std::vector<float> silence;
+    double musicalPosition{0};
 };
 
 Vst3Plugin::Vst3Plugin() = default;
@@ -139,16 +147,28 @@ bool Vst3Plugin::open(const std::filesystem::path& path, std::string& error, con
     }
     instance_->controller = Steinberg::FUnknownPtr<Steinberg::Vst::IEditController>(instance_->component);
     if (!instance_->controller) {
-        for (const auto& info : classes) {
-            if (info.category() != "Component Controller Class") continue;
-            instance_->controller = instance_->module->getFactory().createInstance<Steinberg::Vst::IEditController>(info.ID());
-            if (instance_->controller && instance_->controller->initialize(instance_->host) == Steinberg::kResultOk) break;
-            instance_->controller = nullptr;
+        Steinberg::TUID controllerId{};
+        if(instance_->component->getControllerClassId(controllerId)==Steinberg::kResultOk) {
+            instance_->controller=instance_->module->getFactory().createInstance<Steinberg::Vst::IEditController>(VST3::UID(controllerId));
+            if(!instance_->controller || instance_->controller->initialize(instance_->host)!=Steinberg::kResultOk) {
+                error="the selected plugin controller did not initialize";close();return false;
+            }
+            instance_->componentConnection=Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(instance_->component);
+            instance_->controllerConnection=Steinberg::FUnknownPtr<Steinberg::Vst::IConnectionPoint>(instance_->controller);
+            if(instance_->componentConnection && instance_->controllerConnection) {
+                instance_->componentConnection->connect(instance_->controllerConnection);instance_->controllerConnection->connect(instance_->componentConnection);
+            }
         }
     }
     return true;
 }
 
+std::vector<std::string> Vst3Plugin::classes() const {
+    std::vector<std::string> result;
+    if(instance_ && instance_->module) for(const auto& info:instance_->module->getFactory().classInfos())
+        if(info.category()=="Audio Module Class") result.push_back(info.name());
+    return result;
+}
 std::vector<Vst3Parameter> Vst3Plugin::parameters() const
 {
     std::vector<Vst3Parameter> result;
@@ -176,6 +196,9 @@ bool Vst3Plugin::activate(double sampleRate, std::uint32_t blockSize, std::strin
     if (instance_ == nullptr || instance_->processor == nullptr) {
         error = "the plugin is not open";
         return false;
+    }
+    if(!std::isfinite(sampleRate) || sampleRate<8000 || sampleRate>192000 || !blockSize || blockSize>8192 || instance_->processing) {
+        error="invalid plugin rate, block or activation state";return false;
     }
     Steinberg::Vst::SpeakerArrangement stereo = Steinberg::Vst::SpeakerArr::kStereo;
     const auto inputs = instance_->component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
@@ -213,10 +236,13 @@ bool Vst3Plugin::activate(double sampleRate, std::uint32_t blockSize, std::strin
         instance_->component->setActive(0);
         return false;
     }
+    instance_->capacity=blockSize;instance_->silence.assign(static_cast<std::size_t>(blockSize)*2,0);
+    instance_->audioInput=instance_->process.numInputs>0 && instance_->process.inputs[0].numChannels==2;
     instance_->processor->setProcessing(1);
     instance_->processing = true;
     info_.latencySamples = instance_->processor->getLatencySamples();
     timelineSamples_ = 0;
+    instance_->musicalPosition=0;
     instance_->context = {};
     instance_->context.sampleRate = sampleRate;
     instance_->context.tempo = 120.0;
@@ -236,7 +262,7 @@ bool Vst3Plugin::process(
     const float* inputRight,
     const std::vector<Vst3ParamPoint>* parameters)
 {
-    if (instance_ == nullptr || !instance_->processing || left == nullptr || right == nullptr) {
+    if (instance_ == nullptr || !instance_->processing || left == nullptr || right == nullptr || frames>instance_->capacity) {
         error = "the plugin is not active";
         return false;
     }
@@ -263,14 +289,12 @@ bool Vst3Plugin::process(
     if (instance_->process.numInputs > 0) instance_->process.inputs[0].silenceFlags = 0;
     if (instance_->process.numOutputs > 0) instance_->process.outputs[0].silenceFlags = 0;
     const auto inputs = instance_->component->getBusCount(Steinberg::Vst::kAudio, Steinberg::Vst::kInput);
-    std::vector<float> silence;
     if (inputs > 0) {
         const float* sourceLeft = inputLeft != nullptr ? inputLeft : nullptr;
         const float* sourceRight = inputRight != nullptr ? inputRight : inputLeft;
         if (sourceLeft == nullptr) {
-            silence.assign(static_cast<std::size_t>(frames) * 2, 0.f);
-            sourceLeft = silence.data();
-            sourceRight = silence.data() + frames;
+            sourceLeft = instance_->silence.data();
+            sourceRight = instance_->silence.data() + instance_->capacity;
         }
         float* inputBuffers[] = {const_cast<float*>(sourceLeft), const_cast<float*>(sourceRight)};
         if (!instance_->process.setChannelBuffers(Steinberg::Vst::kInput, 0, inputBuffers, 2)) {
@@ -280,6 +304,7 @@ bool Vst3Plugin::process(
     }
     instance_->context.projectTimeSamples = timelineSamples_;
     instance_->context.continousTimeSamples = timelineSamples_;
+    instance_->context.projectTimeMusic=instance_->musicalPosition;
     instance_->parameterChanges.clearQueue();
     if (parameters != nullptr) {
         for (const auto& point : *parameters) {
@@ -298,6 +323,7 @@ bool Vst3Plugin::process(
         return false;
     }
     timelineSamples_ += frames;
+    instance_->musicalPosition+=frames/instance_->context.sampleRate*instance_->context.tempo/60;
     return true;
 }
 
@@ -328,14 +354,33 @@ bool Vst3Plugin::restoreState(const std::vector<char>& bytes, std::string& error
         error = "setState failed";
         return false;
     }
+    if(instance_->controller) {stream.rewind();instance_->controller->setComponentState(&stream);}
     return true;
 }
+
+bool Vst3Plugin::restart(const std::vector<char>& state,double rate,std::uint32_t frames,std::string& error) {
+    if(!instance_ || !instance_->processor || !instance_->component) {error="plugin is not open";return false;}
+    if(instance_->processing) instance_->processor->setProcessing(0);instance_->processing=false;
+    instance_->component->setActive(0);instance_->process.unprepare();
+    return restoreState(state,error) && activate(rate,frames,error);
+}
+bool Vst3Plugin::hasAudioInput() const noexcept {return instance_ && instance_->audioInput;}
+std::int32_t Vst3Plugin::currentLatency() const noexcept {return instance_ && instance_->processor?static_cast<std::int32_t>(instance_->processor->getLatencySamples()):0;}
+double Vst3Plugin::tailSeconds() const noexcept {
+    if(!instance_ || !instance_->processor || instance_->context.sampleRate<=0) return 0;
+    const auto tail=instance_->processor->getTailSamples();
+    return tail==std::numeric_limits<Steinberg::uint32>::max()?std::numeric_limits<double>::infinity():tail/instance_->context.sampleRate;
+}
+void Vst3Plugin::setTempo(double bpm) noexcept {if(instance_ && std::isfinite(bpm) && bpm>0) instance_->context.tempo=bpm;}
 
 void Vst3Plugin::close() noexcept
 {
     if (instance_ == nullptr) return;
     if (instance_->processing && instance_->processor) instance_->processor->setProcessing(0);
     if (instance_->component) instance_->component->setActive(0);
+    if(instance_->componentConnection && instance_->controllerConnection) {
+        instance_->componentConnection->disconnect(instance_->controllerConnection);instance_->controllerConnection->disconnect(instance_->componentConnection);
+    }
     instance_->process.unprepare();
     if (instance_->controller &&
         reinterpret_cast<void*>(instance_->controller.get()) != reinterpret_cast<void*>(instance_->component.get())) {
